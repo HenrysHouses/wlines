@@ -38,7 +38,8 @@
 
 #define FOREGROUND_TIMER_ID 1
 #define SELECTED_INDEX_NO_RESULT ((size_t)-1)
-#define DRAWTEXT_PARAMS (DT_NOCLIP | DT_NOPREFIX | DT_END_ELLIPSIS)
+#define LINE_HEIGHT(sz) ((sz) + 4)
+#define DRAWTEXT_PARAMS (DT_NOCLIP | DT_NOPREFIX | DT_END_ELLIPSIS | DT_VCENTER | DT_SINGLELINE)
 #define FONT_HMARGIN(sz) (int)(state->settings.fontSize / 6)
 #define G_MARGIN 4
 
@@ -64,6 +65,7 @@ typedef struct {
   bool centerWindow;
   bool horizontalLayout;
   int inputWidth;
+  bool blur;
 } settings_t;
 
 typedef struct {
@@ -224,6 +226,32 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   }
 
   switch (msg) {
+  case WM_SETFOCUS:;
+    LRESULT res = CallWindowProc(state->editWndProc, wnd, msg, wparam, lparam);
+    // Create custom caret with XOR mask to match text color
+    // XOR(bg, fg) = mask. When XORed with bg, mask results in fg.
+    const COLORREF bg = state->settings.bgEdit;
+    const COLORREF fg = state->settings.fgEdit;
+    const COLORREF mask = (GetRValue(bg) ^ GetRValue(fg)) |
+                           ((GetGValue(bg) ^ GetGValue(fg)) << 8) |
+                           ((GetBValue(bg) ^ GetBValue(fg)) << 16);
+    
+    const int height = state->settings.fontSize - 2;
+    HBITMAP hCaretBm = CreateBitmap(2, height, 1, 32, NULL);
+    if (hCaretBm) {
+      HDC hdc = CreateCompatibleDC(NULL);
+      SelectObject(hdc, hCaretBm);
+      HBRUSH hBrush = CreateSolidBrush(mask);
+      RECT r = {0, 0, 2, height};
+      FillRect(hdc, &r, hBrush);
+      DeleteObject(hBrush);
+      DeleteDC(hdc);
+      
+      CreateCaret(wnd, hCaretBm, 0, 0); // Bitmap defines size
+      ShowCaret(wnd);
+      // hCaretBm is owned by the system now
+    }
+    return res;
   case WM_KILLFOCUS: // When focus is lost
     exit(1);
   case WM_CHAR:; // When a character is written
@@ -365,7 +393,9 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProc(wnd, msg, wparam, lparam);
   }
 
-  const int entriesTop = state->settings.fontSize + state->settings.padding + G_MARGIN;
+  const int verticalSpacing = state->settings.horizontalLayout ? 0 : 4;
+  const int entriesTop = LINE_HEIGHT(state->settings.fontSize) +
+                         state->settings.padding + G_MARGIN + verticalSpacing;
   const size_t page =
       state->lineCount ? (state->selectedResultIndex / state->lineCount) : 0;
   const size_t pageStartI = page * state->lineCount;
@@ -421,7 +451,7 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             .top = G_MARGIN + state->settings.padding,
             .right = G_MARGIN + state->settings.padding + state->promptWidth -
                      FONT_HMARGIN(state->settings.fontSize),
-            .bottom = G_MARGIN + state->settings.padding + state->settings.fontSize,
+            .bottom = G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize),
         };
       } else {
         // Vertical: prompt takes half width
@@ -430,24 +460,19 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     FONT_HMARGIN(state->settings.fontSize),
             .top = G_MARGIN + state->settings.padding,
             .right = state->width / 2 - FONT_HMARGIN(state->settings.fontSize),
-            .bottom = G_MARGIN + state->settings.padding + state->settings.fontSize,
+            .bottom = G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize),
         };
       }
 
-      SetDCPenColor(bfhdc, state->settings.bgSelect);
-      SetDCBrushColor(bfhdc, state->settings.bgSelect);
+      // Use key color for prompt background in blur mode to show blur
+      COLORREF promptBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
+      SetDCPenColor(bfhdc, promptBg);
+      SetDCBrushColor(bfhdc, promptBg);
 
-      if (state->settings.horizontalLayout) {
-        // Horizontal: draw background for prompt width area
-        Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
-                  G_MARGIN + state->settings.padding + state->promptWidth,
-                  G_MARGIN + state->settings.padding + state->settings.fontSize);
-      } else {
-        // Vertical: draw background for prompt width
-        Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
-                  G_MARGIN + state->settings.padding + state->promptWidth,
-                  G_MARGIN + state->settings.padding + state->settings.fontSize);
-      }
+      // Draw background for prompt width area
+      Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
+                G_MARGIN + state->settings.padding + state->promptWidth,
+                G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
 
       SetTextColor(bfhdc, state->settings.fgSelect);
       DrawTextW(bfhdc, state->settings.promptText, -1, &promptRect,
@@ -502,8 +527,9 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
         // Set text color and color background for selected
         if (itemIdx == state->selectedResultIndex) {
-          SetDCPenColor(bfhdc, state->settings.bgSelect);
-          SetDCBrushColor(bfhdc, state->settings.bgSelect);
+          COLORREF selBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
+          SetDCPenColor(bfhdc, state->settings.blur ? state->settings.fgSelect : selBg);
+          SetDCBrushColor(bfhdc, selBg);
           Rectangle(bfhdc, currentX, G_MARGIN + state->settings.padding, currentX + 120,
                     state->height - G_MARGIN - state->settings.padding);
           SetTextColor(bfhdc, state->settings.fgSelect);
@@ -546,18 +572,23 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       for (size_t idx = pageStartI; idx < pageStartI + count; idx++) {
         // Set text color and color background
         if (idx == state->selectedResultIndex) {
-          SetDCPenColor(bfhdc, state->settings.bgSelect);
-          SetDCBrushColor(bfhdc, state->settings.bgSelect);
+          COLORREF selBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
+          SetDCPenColor(bfhdc, state->settings.blur ? state->settings.fgSelect : selBg);
+          SetDCBrushColor(bfhdc, selBg);
           Rectangle(bfhdc, G_MARGIN + state->settings.padding, textRect.top,
                     state->width - G_MARGIN - state->settings.padding,
-                    textRect.top + state->settings.fontSize);
+                    textRect.top + LINE_HEIGHT(state->settings.fontSize));
           SetTextColor(bfhdc, state->settings.fgSelect);
         }
 
+        // Calculate single line rect for vertical centering
+        RECT lineRect = textRect;
+        lineRect.bottom = lineRect.top + LINE_HEIGHT(state->settings.fontSize);
+
         // Draw this line
         DrawTextW(bfhdc, state->entries[state->searchResults[idx]], -1,
-                  &textRect, DRAWTEXT_PARAMS);
-        textRect.top += state->settings.fontSize;
+                  &lineRect, DRAWTEXT_PARAMS);
+        textRect.top += LINE_HEIGHT(state->settings.fontSize);
 
         // Reset text colors
         if (idx == state->selectedResultIndex) {
@@ -689,38 +720,92 @@ void createWindow(state_t *state) {
   const int displayHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
 
   if (state->settings.width) {
-    state->width = state->settings.width;
-  } else if (state->settings.horizontalLayout) {
-    // Horizontal layout: use full screen width
-    state->width = displayWidth;
+    state->width = state->settings.width + G_MARGIN * 2;
   } else {
+    // Default to full screen width
     state->width = displayWidth;
   }
 
   if (state->settings.horizontalLayout) {
-    state->height = state->settings.fontSize + state->settings.padding * 2;
+    state->height = LINE_HEIGHT(state->settings.fontSize) + state->settings.padding * 2 + G_MARGIN * 2;
   } else {
-    state->height = state->settings.fontSize * (state->lineCount + 1) +
-                    state->settings.padding * 2;
+    state->height = LINE_HEIGHT(state->settings.fontSize) * (state->lineCount + 1) +
+                    state->settings.padding * 2 + G_MARGIN * 2;
   }
 
-  // Expand for gutter
-  state->width += G_MARGIN * 2;
-  state->height += G_MARGIN * 2;
+  // Ensure we don't exceed display dimensions
+  if (state->width > (size_t)displayWidth) state->width = displayWidth;
+  if (state->height > (size_t)displayHeight) state->height = displayHeight;
 
   int x = 0, y = 0;
   if (state->settings.centerWindow) {
-    x = mi.rcMonitor.left + (displayWidth - state->width) / 2;
-    y = mi.rcMonitor.top + (displayHeight - state->height) / 2;
+    x = mi.rcMonitor.left + (displayWidth - (int)state->width) / 2;
+    y = mi.rcMonitor.top + (displayHeight - (int)state->height) / 2;
   } else {
     x = mi.rcMonitor.left;
     y = mi.rcMonitor.top;
   }
 
   state->mainWnd = CreateWindowExW(
-      WS_EX_TOPMOST | WS_EX_TOOLWINDOW, state->settings.wndClass, L"wlines",
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, state->settings.wndClass, L"wlines",
       WS_POPUP, x, y, state->width, state->height, 0, 0, 0, 0);
   ASSERT_WIN32_RESULT(state->mainWnd);
+
+  // Set window transparency
+  if (state->settings.blur) {
+    // When blur is enabled, we use LWA_COLORKEY to make the background color transparent
+    // so the blur can show through, but we keep LWA_ALPHA at 255 so the text stays opaque.
+    SetLayeredWindowAttributes(state->mainWnd, state->settings.bg, 255, LWA_COLORKEY | LWA_ALPHA);
+  } else {
+    SetLayeredWindowAttributes(state->mainWnd, 0, state->settings.bgAlpha, LWA_ALPHA);
+  }
+
+  if (state->settings.blur) {
+    // Background blur / Acrylic effect (Windows 10+)
+    typedef enum {
+      ACCENT_DISABLED = 0,
+      ACCENT_ENABLE_GRADIENT = 1,
+      ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,
+      ACCENT_ENABLE_BLURBEHIND = 3,
+      ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,
+      ACCENT_INVALID_STATE = 5
+    } ACCENT_STATE;
+
+    typedef struct {
+      ACCENT_STATE AccentState;
+      int AccentFlags;
+      int GradientColor;
+      int AnimationId;
+    } ACCENT_POLICY;
+
+    typedef enum {
+      WCA_ACCENT_POLICY = 19
+    } WINDOWCOMPOSITIONATTRIB;
+
+    typedef struct {
+      WINDOWCOMPOSITIONATTRIB Attribute;
+      PVOID Data;
+      ULONG SizeOfData;
+    } WINDOWCOMPOSITIONATTRIBDATA;
+
+    typedef BOOL (WINAPI *pSetWindowCompositionAttribute)(HWND, WINDOWCOMPOSITIONATTRIBDATA*);
+
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    if (hUser) {
+      pSetWindowCompositionAttribute setWindowCompositionAttribute = 
+          (pSetWindowCompositionAttribute)GetProcAddress(hUser, "SetWindowCompositionAttribute");
+      if (setWindowCompositionAttribute) {
+        // GradientColor is AABBGGRR. state->settings.bg is already 0x00BBGGRR.
+        int tintColor = (state->settings.bgAlpha << 24) | (state->settings.bg & 0xFFFFFF);
+        ACCENT_POLICY accent = { ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, tintColor, 0 };
+        WINDOWCOMPOSITIONATTRIBDATA data;
+        data.Attribute = WCA_ACCENT_POLICY;
+        data.Data = &accent;
+        data.SizeOfData = sizeof(accent);
+        setWindowCompositionAttribute(state->mainWnd, &data);
+      }
+    }
+  }
 
   // Calculate prompt width
   if (state->settings.promptText) {
@@ -753,9 +838,9 @@ void createWindow(state_t *state) {
 
   state->editWnd = CreateWindowExW(
       0, L"EDIT", L"",
-      WS_VISIBLE | WS_CHILD | ES_LEFT | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+      WS_VISIBLE | WS_CHILD | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
       textboxLeft + G_MARGIN, state->settings.padding + G_MARGIN, textboxWidth,
-      state->settings.fontSize, state->mainWnd, (HMENU)101, 0, 0);
+      LINE_HEIGHT(state->settings.fontSize), state->mainWnd, (HMENU)101, 0, 0);
   ASSERT_WIN32_RESULT(state->editWnd);
 
   SendMessage(state->editWnd, WM_SETFONT, (WPARAM)state->font,
@@ -763,6 +848,15 @@ void createWindow(state_t *state) {
   SendMessage(state->editWnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
               MAKELPARAM(FONT_HMARGIN(state->settings.fontSize),
                          FONT_HMARGIN(state->settings.fontSize)));
+
+  // Center text vertically using EM_SETRECT (requires ES_MULTILINE)
+  RECT rect;
+  GetClientRect(state->editWnd, &rect);
+  int top = (LINE_HEIGHT(state->settings.fontSize) - state->settings.fontSize) / 2;
+  rect.top = top;
+  rect.bottom = LINE_HEIGHT(state->settings.fontSize);
+  SendMessage(state->editWnd, EM_SETRECT, 0, (LPARAM)&rect);
+
   state->editWndProc = (WNDPROC)SetWindowLongPtr(state->editWnd, GWLP_WNDPROC,
                                                  (LONG_PTR)&editWndProc);
 
@@ -910,6 +1004,7 @@ void usage(void) {
           "\t-h    Show help and exit\n"
           "\t-cs   Case-sensitive filter\n"
           "\t-id   Output index of the selected line, or -1 when no match\n"
+          "\t-blur Enable background blur (acrylic effect, Windows 10+)\n"
           "\n"
           "OPTIONS:\n"
           "\t-l    <count>   Amount of lines to show in list\n"
@@ -1004,6 +1099,8 @@ int main(void) {
       state.settings.caseSensitiveSearch = true;
     } else if (!wcscmp(argv[i], L"-id")) {
       state.settings.outputIndex = true;
+    } else if (!wcscmp(argv[i], L"-blur")) {
+      state.settings.blur = true;
     } else if (!wcscmp(argv[i], L"-hl")) {
       state.settings.horizontalLayout = true;
       state.settings.inputWidth = _wtoi(argv[++i]);
