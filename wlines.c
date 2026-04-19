@@ -69,6 +69,11 @@ typedef struct {
 } settings_t;
 
 typedef struct {
+  void *data;
+  size_t count, cap;
+} buf_t;
+
+typedef struct {
   settings_t settings;
   HFONT font;
   HWND mainWnd, editWnd;
@@ -80,15 +85,32 @@ typedef struct {
 
   size_t entryCount;
   wchar_t **entries;
+  wchar_t *stdinUtf16;
+  buf_t textboxBuf;
   size_t searchResultCount;
   size_t *searchResults;      // index into `entries`
   size_t selectedResultIndex; // index into `searchResults`
 } state_t;
 
-typedef struct {
-  void *data;
-  size_t count, cap;
-} buf_t;
+state_t *g_state = NULL;
+wchar_t **g_argv = NULL;
+HDC g_bfhdc = NULL;
+HBITMAP g_buffer_bitmap = NULL;
+HBITMAP g_caret_bitmap = NULL;
+
+void cleanup(void) {
+  if (g_argv) LocalFree(g_argv);
+  if (g_bfhdc) DeleteDC(g_bfhdc);
+  if (g_buffer_bitmap) DeleteObject(g_buffer_bitmap);
+  if (g_caret_bitmap) DeleteObject(g_caret_bitmap);
+  if (g_state) {
+    if (g_state->font) DeleteObject(g_state->font);
+    if (g_state->stdinUtf16) free(g_state->stdinUtf16);
+    if (g_state->entries) free(g_state->entries);
+    if (g_state->searchResults) free(g_state->searchResults);
+    if (g_state->textboxBuf.data) free(g_state->textboxBuf.data);
+  }
+}
 
 void *xrealloc(void *ptr, size_t sz) {
   ptr = realloc(ptr, sz);
@@ -149,15 +171,14 @@ void printUtf16AsUtf8(wchar_t *data) {
 }
 
 wchar_t *getTextboxString(state_t *state) {
-  static buf_t buf = {0};
   const size_t length =
       CallWindowProc(state->editWndProc, state->editWnd, EM_LINELENGTH, 0, 0);
-  bufEnsure(&buf, (length + 1) * sizeof(wchar_t));
-  ((wchar_t *)buf.data)[0] = length; // EM_GETLINE requires this
+  bufEnsure(&state->textboxBuf, (length + 1) * sizeof(wchar_t));
+  ((wchar_t *)state->textboxBuf.data)[0] = length; // EM_GETLINE requires this
   CallWindowProc(state->editWndProc, state->editWnd, EM_GETLINE, 0,
-                 (LPARAM)buf.data);
-  ((wchar_t *)buf.data)[length] = 0; // null term
-  return buf.data;
+                 (LPARAM)state->textboxBuf.data);
+  ((wchar_t *)state->textboxBuf.data)[length] = 0; // null term
+  return state->textboxBuf.data;
 }
 
 void filterReduceByStr(state_t *state, const wchar_t *str) {
@@ -230,26 +251,27 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     LRESULT res = CallWindowProc(state->editWndProc, wnd, msg, wparam, lparam);
     // Create custom caret with XOR mask to match text color
     // XOR(bg, fg) = mask. When XORed with bg, mask results in fg.
-    const COLORREF bg = state->settings.bgEdit;
+    const bool bgEditTransparent = state->settings.blur && state->settings.bgEditAlpha < 255;
+    const COLORREF bg = bgEditTransparent ? state->settings.bg : state->settings.bgEdit;
     const COLORREF fg = state->settings.fgEdit;
     const COLORREF mask = (GetRValue(bg) ^ GetRValue(fg)) |
                            ((GetGValue(bg) ^ GetGValue(fg)) << 8) |
                            ((GetBValue(bg) ^ GetBValue(fg)) << 16);
     
     const int height = state->settings.fontSize - 2;
-    HBITMAP hCaretBm = CreateBitmap(2, height, 1, 32, NULL);
-    if (hCaretBm) {
+    if (g_caret_bitmap) DeleteObject(g_caret_bitmap);
+    g_caret_bitmap = CreateBitmap(2, height, 1, 32, NULL);
+    if (g_caret_bitmap) {
       HDC hdc = CreateCompatibleDC(NULL);
-      SelectObject(hdc, hCaretBm);
+      SelectObject(hdc, g_caret_bitmap);
       HBRUSH hBrush = CreateSolidBrush(mask);
       RECT r = {0, 0, 2, height};
       FillRect(hdc, &r, hBrush);
       DeleteObject(hBrush);
       DeleteDC(hdc);
       
-      CreateCaret(wnd, hCaretBm, 0, 0); // Bitmap defines size
+      CreateCaret(wnd, g_caret_bitmap, 0, 0); // Bitmap defines size
       ShowCaret(wnd);
-      // hCaretBm is owned by the system now
     }
     return res;
   case WM_KILLFOCUS: // When focus is lost
@@ -317,43 +339,51 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case VK_ESCAPE: // Escape - Exit
       exit(1);
     case VK_UP: // Up - Previous result
-      state->selectedResultIndex =
-          (state->selectedResultIndex - 1 + state->searchResultCount) %
-          state->searchResultCount;
-      RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      if (state->searchResultCount > 0) {
+        state->selectedResultIndex =
+            (state->selectedResultIndex - 1 + state->searchResultCount) %
+            state->searchResultCount;
+        RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      }
       return 0;
     case VK_DOWN: // Down - Next result
-      state->selectedResultIndex =
-          (state->selectedResultIndex + 1) % state->searchResultCount;
-      RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      if (state->searchResultCount > 0) {
+        state->selectedResultIndex =
+            (state->selectedResultIndex + 1) % state->searchResultCount;
+        RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      }
       return 0;
     case VK_LEFT: // Left - Previous result (especially for horizontal layout)
-      if (state->selectedResultIndex > 0) {
-        state->selectedResultIndex--;
-      } else {
-        state->selectedResultIndex = state->searchResultCount - 1;
+      if (state->searchResultCount > 0) {
+        if (state->selectedResultIndex > 0) {
+          state->selectedResultIndex--;
+        } else {
+          state->selectedResultIndex = state->searchResultCount - 1;
+        }
+        RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
       }
-      RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
       return 0;
     case VK_RIGHT: // Right - Next result (especially for horizontal layout)
-      state->selectedResultIndex =
-          (state->selectedResultIndex + 1) % state->searchResultCount;
-      RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      if (state->searchResultCount > 0) {
+        state->selectedResultIndex =
+            (state->selectedResultIndex + 1) % state->searchResultCount;
+        RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+      }
       return 0;
     case VK_HOME: // Home - First result
-      if (state->selectedResultIndex > 0) {
+      if (state->searchResultCount > 0 && state->selectedResultIndex > 0) {
         state->selectedResultIndex = 0;
         RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
       }
       return 0;
     case VK_END: // End - Last result
-      if (state->selectedResultIndex + 1 < state->searchResultCount) {
+      if (state->searchResultCount > 0 && state->selectedResultIndex + 1 < state->searchResultCount) {
         state->selectedResultIndex = state->searchResultCount - 1;
         RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
       }
       return 0;
     case VK_PRIOR: // Page Up - Previous page (vertical layout only)
-      if (!state->settings.horizontalLayout && state->selectedResultIndex > 0) {
+      if (!state->settings.horizontalLayout && state->searchResultCount > 0 && state->selectedResultIndex > 0) {
         const ssize_t n = (state->selectedResultIndex / state->lineCount - 1) *
                           state->lineCount;
         state->selectedResultIndex = max(0, n);
@@ -361,7 +391,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       return 0;
     case VK_NEXT: // Page Down - Next page (vertical layout only)
-      if (!state->settings.horizontalLayout &&
+      if (!state->settings.horizontalLayout && state->searchResultCount > 0 &&
           state->selectedResultIndex + 1 < state->searchResultCount) {
         const size_t n = (state->selectedResultIndex / state->lineCount + 1) *
                          state->lineCount;
@@ -418,26 +448,24 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     HDC real_hdc = BeginPaint(wnd, &ps);
 
     // Use a draw buffer device
-    static HDC bfhdc = 0;
-    static HBITMAP buffer_bitmap = 0;
-    if (!bfhdc) {
+    if (!g_bfhdc) {
       // Create
-      ASSERT_WIN32_RESULT(bfhdc = CreateCompatibleDC(real_hdc));
-      ASSERT_WIN32_RESULT(buffer_bitmap = CreateCompatibleBitmap(
+      ASSERT_WIN32_RESULT(g_bfhdc = CreateCompatibleDC(real_hdc));
+      ASSERT_WIN32_RESULT(g_buffer_bitmap = CreateCompatibleBitmap(
                               real_hdc, state->width, state->height));
 
       // Setup
-      SelectObject(bfhdc, buffer_bitmap);
-      SelectObject(bfhdc, state->font);
-      SelectObject(bfhdc, GetStockObject(DC_PEN));
-      SelectObject(bfhdc, GetStockObject(DC_BRUSH));
-      SetBkMode(bfhdc, TRANSPARENT);
+      SelectObject(g_bfhdc, g_buffer_bitmap);
+      SelectObject(g_bfhdc, state->font);
+      SelectObject(g_bfhdc, GetStockObject(DC_PEN));
+      SelectObject(g_bfhdc, GetStockObject(DC_BRUSH));
+      SetBkMode(g_bfhdc, TRANSPARENT);
     }
 
     // Clear window
-    SetDCPenColor(bfhdc, state->settings.bg);
-    SetDCBrushColor(bfhdc, state->settings.bg);
-    Rectangle(bfhdc, 0, 0, state->width, state->height);
+    SetDCPenColor(g_bfhdc, state->settings.bg);
+    SetDCBrushColor(g_bfhdc, state->settings.bg);
+    Rectangle(g_bfhdc, 0, 0, state->width, state->height);
 
     // Draw prompt
     if (state->settings.promptText) {
@@ -464,19 +492,57 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         };
       }
 
-      // Use key color for prompt background in blur mode to show blur
-      COLORREF promptBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
-      SetDCPenColor(bfhdc, promptBg);
-      SetDCBrushColor(bfhdc, promptBg);
+      // Use key color for prompt background in blur mode ONLY if alpha is used
+      const bool promptTransparent = state->settings.blur && state->settings.bgSelectAlpha < 255;
+      COLORREF promptBg = promptTransparent ? state->settings.bg : state->settings.bgSelect;
+      SetDCPenColor(g_bfhdc, promptBg);
+      SetDCBrushColor(g_bfhdc, promptBg);
 
       // Draw background for prompt width area
-      Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
+      Rectangle(g_bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
                 G_MARGIN + state->settings.padding + state->promptWidth,
                 G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
 
-      SetTextColor(bfhdc, state->settings.fgSelect);
-      DrawTextW(bfhdc, state->settings.promptText, -1, &promptRect,
+      // Draw outline for prompt in blur mode if transparent
+      if (promptTransparent) {
+        SetDCPenColor(g_bfhdc, state->settings.bgSelect);
+        HGDIOBJ oldBrush = SelectObject(g_bfhdc, GetStockObject(HOLLOW_BRUSH));
+        Rectangle(g_bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
+                  G_MARGIN + state->settings.padding + state->promptWidth,
+                  G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
+        SelectObject(g_bfhdc, oldBrush);
+      }
+
+      SetTextColor(g_bfhdc, state->settings.fgSelect);
+      DrawTextW(g_bfhdc, state->settings.promptText, -1, &promptRect,
                 DRAWTEXT_PARAMS);
+    }
+
+    // Draw input field background/outline
+    const bool editTransparent = state->settings.blur && state->settings.bgEditAlpha < 255;
+    if (state->settings.blur) {
+      size_t tbLeft = state->settings.padding + state->promptWidth;
+      size_t tbWidth;
+      if (state->settings.horizontalLayout) {
+        tbWidth = state->settings.inputWidth;
+      } else {
+        tbWidth = state->width - (tbLeft + G_MARGIN) - state->settings.padding - G_MARGIN;
+      }
+
+      if (editTransparent) {
+        HPEN hPen = CreatePen(PS_SOLID, 1, state->settings.bgEdit);
+        HGDIOBJ oldPen = SelectObject(g_bfhdc, hPen);
+        int lineY = G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize) - 1;
+        MoveToEx(g_bfhdc, tbLeft + G_MARGIN, lineY, NULL);
+        LineTo(g_bfhdc, tbLeft + G_MARGIN + tbWidth, lineY);
+        SelectObject(g_bfhdc, oldPen);
+        DeleteObject(hPen);
+      } else {
+        SetDCPenColor(g_bfhdc, state->settings.bgEdit);
+        SetDCBrushColor(g_bfhdc, state->settings.bgEdit);
+        Rectangle(g_bfhdc, tbLeft + G_MARGIN, G_MARGIN + state->settings.padding,
+                  tbLeft + G_MARGIN + tbWidth, G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
+      }
     }
 
     // Draw texts
@@ -488,7 +554,7 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                  FONT_HMARGIN(state->settings.fontSize),
         .bottom = state->height - G_MARGIN,
     };
-    SetTextColor(bfhdc, state->settings.fg);
+    SetTextColor(g_bfhdc, state->settings.fg);
     const size_t count =
         min(state->lineCount, state->searchResultCount - pageStartI);
 
@@ -527,18 +593,19 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
         // Set text color and color background for selected
         if (itemIdx == state->selectedResultIndex) {
-          COLORREF selBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
-          SetDCPenColor(bfhdc, state->settings.blur ? state->settings.fgSelect : selBg);
-          SetDCBrushColor(bfhdc, selBg);
-          Rectangle(bfhdc, currentX, G_MARGIN + state->settings.padding, currentX + 120,
+          const bool selTransparent = state->settings.blur && state->settings.bgSelectAlpha < 255;
+          COLORREF selBg = selTransparent ? state->settings.bg : state->settings.bgSelect;
+          SetDCPenColor(g_bfhdc, selTransparent ? state->settings.fgSelect : selBg);
+          SetDCBrushColor(g_bfhdc, selBg);
+          Rectangle(g_bfhdc, currentX, G_MARGIN + state->settings.padding, currentX + 120,
                     state->height - G_MARGIN - state->settings.padding);
-          SetTextColor(bfhdc, state->settings.fgSelect);
+          SetTextColor(g_bfhdc, state->settings.fgSelect);
         } else {
-          SetTextColor(bfhdc, state->settings.fg);
+          SetTextColor(g_bfhdc, state->settings.fg);
         }
 
         // Draw this item
-        DrawTextW(bfhdc, state->entries[state->searchResults[itemIdx]], -1,
+        DrawTextW(g_bfhdc, state->entries[state->searchResults[itemIdx]], -1,
                   &itemRect,
                   DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER | DT_VCENTER |
                       DT_SINGLELINE);
@@ -552,33 +619,34 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         const int barX = itemsStartX + (availableWidth - barW) * (int)pageStartIdx / (int)(state->searchResultCount - itemsPerPageSafe);
 
         // Draw outline (window background color)
-        SetDCPenColor(bfhdc, state->settings.bg);
-        SetDCBrushColor(bfhdc, state->settings.bg);
+        SetDCPenColor(g_bfhdc, state->settings.bg);
+        SetDCBrushColor(g_bfhdc, state->settings.bg);
         // Top bar outline
-        Rectangle(bfhdc, barX - 1, G_MARGIN / 2 - 1, barX + barW + 1, G_MARGIN / 2 + 3);
+        Rectangle(g_bfhdc, barX - 1, G_MARGIN / 2 - 1, barX + barW + 1, G_MARGIN / 2 + 3);
         // Bottom bar outline
-        Rectangle(bfhdc, barX - 1, (int)state->height - G_MARGIN / 2 - 3, barX + barW + 1, (int)state->height - G_MARGIN / 2 + 1);
+        Rectangle(g_bfhdc, barX - 1, (int)state->height - G_MARGIN / 2 - 3, barX + barW + 1, (int)state->height - G_MARGIN / 2 + 1);
 
         // Draw thumb (selected color)
-        SetDCPenColor(bfhdc, state->settings.bgSelect);
-        SetDCBrushColor(bfhdc, state->settings.bgSelect);
+        SetDCPenColor(g_bfhdc, state->settings.bgSelect);
+        SetDCBrushColor(g_bfhdc, state->settings.bgSelect);
         // Top bar
-        Rectangle(bfhdc, barX, G_MARGIN / 2, barX + barW, G_MARGIN / 2 + 2);
+        Rectangle(g_bfhdc, barX, G_MARGIN / 2, barX + barW, G_MARGIN / 2 + 2);
         // Bottom bar
-        Rectangle(bfhdc, barX, (int)state->height - G_MARGIN / 2 - 2, barX + barW, (int)state->height - G_MARGIN / 2);
+        Rectangle(g_bfhdc, barX, (int)state->height - G_MARGIN / 2 - 2, barX + barW, (int)state->height - G_MARGIN / 2);
       }
     } else {
       // Vertical layout (original behavior)
       for (size_t idx = pageStartI; idx < pageStartI + count; idx++) {
         // Set text color and color background
         if (idx == state->selectedResultIndex) {
-          COLORREF selBg = state->settings.blur ? state->settings.bg : state->settings.bgSelect;
-          SetDCPenColor(bfhdc, state->settings.blur ? state->settings.fgSelect : selBg);
-          SetDCBrushColor(bfhdc, selBg);
-          Rectangle(bfhdc, G_MARGIN + state->settings.padding, textRect.top,
+          const bool selTransparent = state->settings.blur && state->settings.bgSelectAlpha < 255;
+          COLORREF selBg = selTransparent ? state->settings.bg : state->settings.bgSelect;
+          SetDCPenColor(g_bfhdc, selTransparent ? state->settings.fgSelect : selBg);
+          SetDCBrushColor(g_bfhdc, selBg);
+          Rectangle(g_bfhdc, G_MARGIN + state->settings.padding, textRect.top,
                     state->width - G_MARGIN - state->settings.padding,
                     textRect.top + LINE_HEIGHT(state->settings.fontSize));
-          SetTextColor(bfhdc, state->settings.fgSelect);
+          SetTextColor(g_bfhdc, state->settings.fgSelect);
         }
 
         // Calculate single line rect for vertical centering
@@ -586,13 +654,13 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         lineRect.bottom = lineRect.top + LINE_HEIGHT(state->settings.fontSize);
 
         // Draw this line
-        DrawTextW(bfhdc, state->entries[state->searchResults[idx]], -1,
+        DrawTextW(g_bfhdc, state->entries[state->searchResults[idx]], -1,
                   &lineRect, DRAWTEXT_PARAMS);
         textRect.top += LINE_HEIGHT(state->settings.fontSize);
 
         // Reset text colors
         if (idx == state->selectedResultIndex) {
-          SetTextColor(bfhdc, state->settings.fg);
+          SetTextColor(g_bfhdc, state->settings.fg);
         }
       }
 
@@ -603,34 +671,35 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         const int barY = entriesTop + (trackHeight - barH) * (int)pageStartI / (int)(state->searchResultCount - state->lineCount);
 
         // Draw outline (window background color)
-        SetDCPenColor(bfhdc, state->settings.bg);
-        SetDCBrushColor(bfhdc, state->settings.bg);
+        SetDCPenColor(g_bfhdc, state->settings.bg);
+        SetDCBrushColor(g_bfhdc, state->settings.bg);
         // Left bar outline
-        Rectangle(bfhdc, G_MARGIN / 2 - 1, barY - 1, G_MARGIN / 2 + 3, barY + barH + 1);
+        Rectangle(g_bfhdc, G_MARGIN / 2 - 1, barY - 1, G_MARGIN / 2 + 3, barY + barH + 1);
         // Right bar outline
-        Rectangle(bfhdc, (int)state->width - G_MARGIN / 2 - 3, barY - 1, (int)state->width - G_MARGIN / 2 + 1, barY + barH + 1);
+        Rectangle(g_bfhdc, (int)state->width - G_MARGIN / 2 - 3, barY - 1, (int)state->width - G_MARGIN / 2 + 1, barY + barH + 1);
 
         // Draw thumb (selected color)
-        SetDCPenColor(bfhdc, state->settings.bgSelect);
-        SetDCBrushColor(bfhdc, state->settings.bgSelect);
+        SetDCPenColor(g_bfhdc, state->settings.bgSelect);
+        SetDCBrushColor(g_bfhdc, state->settings.bgSelect);
         // Left bar
-        Rectangle(bfhdc, G_MARGIN / 2, barY, G_MARGIN / 2 + 2, barY + barH);
+        Rectangle(g_bfhdc, G_MARGIN / 2, barY, G_MARGIN / 2 + 2, barY + barH);
         // Right bar
-        Rectangle(bfhdc, (int)state->width - G_MARGIN / 2 - 2, barY, (int)state->width - G_MARGIN / 2, barY + barH);
+        Rectangle(g_bfhdc, (int)state->width - G_MARGIN / 2 - 2, barY, (int)state->width - G_MARGIN / 2, barY + barH);
       }
     }
 
     // Blit
-    BitBlt(real_hdc, 0, 0, state->width, state->height, bfhdc, 0, 0, SRCCOPY);
+    BitBlt(real_hdc, 0, 0, state->width, state->height, g_bfhdc, 0, 0, SRCCOPY);
 
     // End
     EndPaint(wnd, &ps);
     return 0;
   case WM_CTLCOLOREDIT:; // Textbox colors
     HDC hdc = (HDC)wparam;
+    COLORREF bg = (state->settings.blur && state->settings.bgEditAlpha < 255) ? state->settings.bg : state->settings.bgEdit;
     SetTextColor(hdc, state->settings.fgEdit);
-    SetBkColor(hdc, state->settings.bgEdit);
-    SetDCBrushColor(hdc, state->settings.bgEdit);
+    SetBkColor(hdc, bg);
+    SetDCBrushColor(hdc, bg);
     return (LRESULT)GetStockObject(DC_BRUSH);
   case WM_CLOSE:
     exit(1);
@@ -640,6 +709,10 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     size_t newIdx = state->selectedResultIndex;
 
     if (state->settings.horizontalLayout) {
+      if (mouseY < (int)(G_MARGIN + state->settings.padding) || 
+          mouseY > (int)(G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize))) {
+        return 0;
+      }
       const int itemsStartX = G_MARGIN + state->settings.padding + state->promptWidth +
                               state->settings.inputWidth +
                               state->settings.padding;
@@ -661,7 +734,7 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       }
     } else {
       if (mouseY >= entriesTop) {
-        newIdx = pageStartI + (mouseY - entriesTop) / state->settings.fontSize;
+        newIdx = pageStartI + (mouseY - entriesTop) / LINE_HEIGHT(state->settings.fontSize);
         if (newIdx >= state->searchResultCount) {
           newIdx = state->searchResultCount - 1;
         }
@@ -726,11 +799,12 @@ void createWindow(state_t *state) {
     state->width = displayWidth;
   }
 
+  const int verticalSpacing = state->settings.horizontalLayout ? 0 : 4;
   if (state->settings.horizontalLayout) {
     state->height = LINE_HEIGHT(state->settings.fontSize) + state->settings.padding * 2 + G_MARGIN * 2;
   } else {
     state->height = LINE_HEIGHT(state->settings.fontSize) * (state->lineCount + 1) +
-                    state->settings.padding * 2 + G_MARGIN * 2;
+                    state->settings.padding * 2 + G_MARGIN * 2 + verticalSpacing;
   }
 
   // Ensure we don't exceed display dimensions
@@ -752,15 +826,13 @@ void createWindow(state_t *state) {
   ASSERT_WIN32_RESULT(state->mainWnd);
 
   // Set window transparency
-  if (state->settings.blur) {
-    // When blur is enabled, we use LWA_COLORKEY to make the background color transparent
-    // so the blur can show through, but we keep LWA_ALPHA at 255 so the text stays opaque.
+  if (state->settings.blur && state->settings.bgAlpha < 255) {
     SetLayeredWindowAttributes(state->mainWnd, state->settings.bg, 255, LWA_COLORKEY | LWA_ALPHA);
   } else {
     SetLayeredWindowAttributes(state->mainWnd, 0, state->settings.bgAlpha, LWA_ALPHA);
   }
 
-  if (state->settings.blur) {
+  if (state->settings.blur && state->settings.bgAlpha < 255) {
     // Background blur / Acrylic effect (Windows 10+)
     typedef enum {
       ACCENT_DISABLED = 0,
@@ -840,7 +912,7 @@ void createWindow(state_t *state) {
       0, L"EDIT", L"",
       WS_VISIBLE | WS_CHILD | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
       textboxLeft + G_MARGIN, state->settings.padding + G_MARGIN, textboxWidth,
-      LINE_HEIGHT(state->settings.fontSize), state->mainWnd, (HMENU)101, 0, 0);
+      LINE_HEIGHT(state->settings.fontSize) - 1, state->mainWnd, (HMENU)101, 0, 0);
   ASSERT_WIN32_RESULT(state->editWnd);
 
   SendMessage(state->editWnd, WM_SETFONT, (WPARAM)state->font,
@@ -852,9 +924,9 @@ void createWindow(state_t *state) {
   // Center text vertically using EM_SETRECT (requires ES_MULTILINE)
   RECT rect;
   GetClientRect(state->editWnd, &rect);
-  int top = (LINE_HEIGHT(state->settings.fontSize) - state->settings.fontSize) / 2;
+  int top = (LINE_HEIGHT(state->settings.fontSize) - 1 - state->settings.fontSize) / 2;
   rect.top = top;
-  rect.bottom = LINE_HEIGHT(state->settings.fontSize);
+  rect.bottom = LINE_HEIGHT(state->settings.fontSize) - 1;
   SendMessage(state->editWnd, EM_SETRECT, 0, (LPARAM)&rect);
 
   state->editWndProc = (WNDPROC)SetWindowLongPtr(state->editWnd, GWLP_WNDPROC,
@@ -890,9 +962,9 @@ void parseStdinEntries(state_t *state) {
   // Convert to utf16
   const size_t charCount =
       MultiByteToWideChar(CP_UTF8, 0, stdinUtf8.data, stdinUtf8.count, 0, 0);
-  wchar_t *stdinUtf16 = xrealloc(0, (charCount + 1) * sizeof(wchar_t));
-  memset(stdinUtf16, 0, (charCount + 1) * sizeof(wchar_t));
-  MultiByteToWideChar(CP_UTF8, 0, stdinUtf8.data, stdinUtf8.count, stdinUtf16,
+  state->stdinUtf16 = xrealloc(0, (charCount + 1) * sizeof(wchar_t));
+  memset(state->stdinUtf16, 0, (charCount + 1) * sizeof(wchar_t));
+  MultiByteToWideChar(CP_UTF8, 0, stdinUtf8.data, stdinUtf8.count, state->stdinUtf16,
                       charCount);
   free(stdinUtf8.data);
 
@@ -901,16 +973,16 @@ void parseStdinEntries(state_t *state) {
   buf_t entryBuf = {0};
   size_t lineStartI = 0;
   for (size_t i = 0; i < charCount; i++) {
-    if (stdinUtf16[i] == L'\r') {
-      stdinUtf16[i] = L' '; // Strip carriage returns
+    if (state->stdinUtf16[i] == L'\r') {
+      state->stdinUtf16[i] = L' '; // Strip carriage returns
     }
-    if (stdinUtf16[i] == L'\n' || i == charCount - 1) {
+    if (state->stdinUtf16[i] == L'\n' || i == charCount - 1) {
       bufAdd(&entryBuf, sizeof(wchar_t *));
-      ((wchar_t **)entryBuf.data)[state->entryCount] = &stdinUtf16[lineStartI];
-      if (stdinUtf16[i] == L'\n') {
-        stdinUtf16[i] = 0;
+      ((wchar_t **)entryBuf.data)[state->entryCount] = &state->stdinUtf16[lineStartI];
+      if (state->stdinUtf16[i] == L'\n') {
+        state->stdinUtf16[i] = 0;
       } else if (i == charCount - 1) {
-        stdinUtf16[i + 1] = 0;
+        state->stdinUtf16[i + 1] = 0;
       }
       lineStartI = i + 1;
       state->entryCount++;
