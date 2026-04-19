@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #define ASSERT_WIN32_RESULT(result)                                            \
   do {                                                                         \
@@ -37,6 +38,7 @@
 #define SELECTED_INDEX_NO_RESULT ((size_t)-1)
 #define DRAWTEXT_PARAMS (DT_NOCLIP | DT_NOPREFIX | DT_END_ELLIPSIS)
 #define FONT_HMARGIN(sz) (int)(state->settings.fontSize / 6)
+#define G_MARGIN 4
 
 typedef enum {
   FM_COMPLETE,
@@ -46,8 +48,8 @@ typedef enum {
 typedef struct {
   wchar_t *wndClass;
   int padding;
-  char *fontName;
-  char *promptText;
+  wchar_t *fontName;
+  wchar_t *promptText;
   int fontSize;
   filter_mode_t filterMode;
   bool caseSensitiveSearch;
@@ -125,12 +127,21 @@ void windowEventLoop(void) {
 }
 
 void printUtf16AsUtf8(wchar_t *data) {
-  static buf_t buf = {0};
   const size_t len = wcslen(data);
+  if (len == 0) {
+    DWORD written;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "\n", 1, &written, NULL);
+    return;
+  }
   const int bytecount = WideCharToMultiByte(CP_UTF8, 0, data, len, 0, 0, 0, 0);
-  bufEnsure(&buf, bytecount);
-  WideCharToMultiByte(CP_UTF8, 0, data, len, buf.data, bytecount, 0, 0);
-  printf("%.*s\n", bytecount, (char *)buf.data);
+  char *utf8 = xrealloc(0, bytecount);
+  WideCharToMultiByte(CP_UTF8, 0, data, len, utf8, bytecount, 0, 0);
+
+  HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+  DWORD written;
+  WriteFile(hStdOut, utf8, bytecount, &written, NULL);
+  WriteFile(hStdOut, "\n", 1, &written, NULL);
+  free(utf8);
 }
 
 wchar_t *getTextboxString(state_t *state) {
@@ -205,7 +216,7 @@ void updateSearchResults(state_t *state) {
 }
 
 LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-  state_t *state = (state_t *)GetWindowLongPtrA(wnd, GWLP_USERDATA);
+  state_t *state = (state_t *)GetWindowLongPtrW(wnd, GWLP_USERDATA);
   if (!state) {
     return DefWindowProc(wnd, msg, wparam, lparam);
   }
@@ -347,12 +358,12 @@ void forceForeground(HWND hwnd) {
 }
 
 LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-  state_t *state = (state_t *)GetWindowLongPtrA(wnd, GWLP_USERDATA);
+  state_t *state = (state_t *)GetWindowLongPtrW(wnd, GWLP_USERDATA);
   if (!state) {
     return DefWindowProc(wnd, msg, wparam, lparam);
   }
 
-  const int entriesTop = state->settings.fontSize + state->settings.padding;
+  const int entriesTop = state->settings.fontSize + state->settings.padding + G_MARGIN;
   const size_t page =
       state->lineCount ? (state->selectedResultIndex / state->lineCount) : 0;
   const size_t pageStartI = page * state->lineCount;
@@ -403,21 +414,21 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       if (state->settings.horizontalLayout) {
         // Horizontal: prompt on left side only
         promptRect = (RECT){
-            .left = state->settings.padding +
+            .left = G_MARGIN + state->settings.padding +
                     FONT_HMARGIN(state->settings.fontSize),
-            .top = state->settings.padding,
-            .right = state->settings.padding + state->promptWidth -
+            .top = G_MARGIN + state->settings.padding,
+            .right = G_MARGIN + state->settings.padding + state->promptWidth -
                      FONT_HMARGIN(state->settings.fontSize),
-            .bottom = state->settings.padding + state->settings.fontSize,
+            .bottom = G_MARGIN + state->settings.padding + state->settings.fontSize,
         };
       } else {
         // Vertical: prompt takes half width
         promptRect = (RECT){
-            .left = state->settings.padding +
+            .left = G_MARGIN + state->settings.padding +
                     FONT_HMARGIN(state->settings.fontSize),
-            .top = state->settings.padding,
+            .top = G_MARGIN + state->settings.padding,
             .right = state->width / 2 - FONT_HMARGIN(state->settings.fontSize),
-            .bottom = state->settings.padding + state->settings.fontSize * 2,
+            .bottom = G_MARGIN + state->settings.padding + state->settings.fontSize,
         };
       }
 
@@ -426,29 +437,29 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
       if (state->settings.horizontalLayout) {
         // Horizontal: draw background for prompt width area
-        Rectangle(bfhdc, state->settings.padding, state->settings.padding,
-                  state->settings.padding + state->promptWidth,
-                  state->settings.padding + state->settings.fontSize);
+        Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
+                  G_MARGIN + state->settings.padding + state->promptWidth,
+                  G_MARGIN + state->settings.padding + state->settings.fontSize);
       } else {
         // Vertical: draw background for prompt width
-        Rectangle(bfhdc, state->settings.padding, promptRect.top,
-                  state->settings.padding + state->promptWidth,
-                  promptRect.top + state->settings.fontSize);
+        Rectangle(bfhdc, G_MARGIN + state->settings.padding, G_MARGIN + state->settings.padding,
+                  G_MARGIN + state->settings.padding + state->promptWidth,
+                  G_MARGIN + state->settings.padding + state->settings.fontSize);
       }
 
       SetTextColor(bfhdc, state->settings.fgSelect);
-      DrawTextA(bfhdc, state->settings.promptText, -1, &promptRect,
+      DrawTextW(bfhdc, state->settings.promptText, -1, &promptRect,
                 DRAWTEXT_PARAMS);
     }
 
     // Draw texts
     RECT textRect = {
         .left =
-            state->settings.padding + FONT_HMARGIN(state->settings.fontSize),
+            G_MARGIN + state->settings.padding + FONT_HMARGIN(state->settings.fontSize),
         .top = entriesTop,
-        .right = state->width - state->settings.padding -
+        .right = state->width - G_MARGIN - state->settings.padding -
                  FONT_HMARGIN(state->settings.fontSize),
-        .bottom = state->height,
+        .bottom = state->height - G_MARGIN,
     };
     SetTextColor(bfhdc, state->settings.fg);
     const size_t count =
@@ -457,11 +468,11 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (state->settings.horizontalLayout) {
       // Horizontal layout: prompt on left, input field, then items displayed as
       // pages
-      const int itemsStartX = state->settings.padding + state->promptWidth +
+      const int itemsStartX = G_MARGIN + state->settings.padding + state->promptWidth +
                               state->settings.inputWidth +
                               state->settings.padding;
       const int availableWidth =
-          state->width - itemsStartX - state->settings.padding;
+          state->width - itemsStartX - state->settings.padding - G_MARGIN;
       const int itemWidth = 135; // 120px item + 15px spacing
       const int hm = FONT_HMARGIN(state->settings.fontSize);
 
@@ -478,25 +489,21 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       size_t itemIdx;
       for (itemIdx = pageStartIdx;
            itemIdx < state->searchResultCount &&
-           currentX + itemWidth <= (int)state->width - state->settings.padding;
+           currentX + itemWidth <= (int)state->width - state->settings.padding - G_MARGIN;
            itemIdx++) {
         RECT itemRect = {
             .left = currentX + hm,
-            .top = state->settings.padding + hm,
-            .right = min((int)state->width - state->settings.padding,
-                         currentX + 120) -
-                     hm,
-            .bottom = state->height - state->settings.padding - hm,
+            .top = G_MARGIN + state->settings.padding + hm,
+            .right = currentX + 120 - hm,
+            .bottom = state->height - G_MARGIN - state->settings.padding - hm,
         };
 
         // Set text color and color background for selected
         if (itemIdx == state->selectedResultIndex) {
           SetDCPenColor(bfhdc, state->settings.bgSelect);
           SetDCBrushColor(bfhdc, state->settings.bgSelect);
-          Rectangle(
-              bfhdc, currentX, state->settings.padding,
-              min((int)state->width - state->settings.padding, currentX + 120),
-              state->height - state->settings.padding);
+          Rectangle(bfhdc, currentX, G_MARGIN + state->settings.padding, currentX + 120,
+                    state->height - G_MARGIN - state->settings.padding);
           SetTextColor(bfhdc, state->settings.fgSelect);
         } else {
           SetTextColor(bfhdc, state->settings.fg);
@@ -511,21 +518,26 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         currentX += itemWidth;
       }
 
-      // If there are more items, show ellipsis indicator
-      if (itemIdx < state->searchResultCount) {
-        RECT itemRect = {
-            .left = currentX + hm,
-            .top = state->settings.padding + hm,
-            .right = min((int)state->width - state->settings.padding,
-                         currentX + itemWidth) -
-                     hm,
-            .bottom = state->height - state->settings.padding - hm,
-        };
+      // Scrollbar markers (non-interactable)
+      if (state->searchResultCount > (size_t)itemsPerPageSafe) {
+        const int barW = max(10, availableWidth * itemsPerPageSafe / (int)state->searchResultCount);
+        const int barX = itemsStartX + (availableWidth - barW) * (int)pageStartIdx / (int)(state->searchResultCount - itemsPerPageSafe);
 
-        SetTextColor(bfhdc, state->settings.fg);
-        DrawTextW(bfhdc, L"...", -1, &itemRect,
-                  DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER | DT_VCENTER |
-                      DT_SINGLELINE);
+        // Draw outline (window background color)
+        SetDCPenColor(bfhdc, state->settings.bg);
+        SetDCBrushColor(bfhdc, state->settings.bg);
+        // Top bar outline
+        Rectangle(bfhdc, barX - 1, G_MARGIN / 2 - 1, barX + barW + 1, G_MARGIN / 2 + 3);
+        // Bottom bar outline
+        Rectangle(bfhdc, barX - 1, (int)state->height - G_MARGIN / 2 - 3, barX + barW + 1, (int)state->height - G_MARGIN / 2 + 1);
+
+        // Draw thumb (selected color)
+        SetDCPenColor(bfhdc, state->settings.bgSelect);
+        SetDCBrushColor(bfhdc, state->settings.bgSelect);
+        // Top bar
+        Rectangle(bfhdc, barX, G_MARGIN / 2, barX + barW, G_MARGIN / 2 + 2);
+        // Bottom bar
+        Rectangle(bfhdc, barX, (int)state->height - G_MARGIN / 2 - 2, barX + barW, (int)state->height - G_MARGIN / 2);
       }
     } else {
       // Vertical layout (original behavior)
@@ -534,8 +546,8 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (idx == state->selectedResultIndex) {
           SetDCPenColor(bfhdc, state->settings.bgSelect);
           SetDCBrushColor(bfhdc, state->settings.bgSelect);
-          Rectangle(bfhdc, state->settings.padding, textRect.top,
-                    state->width - state->settings.padding,
+          Rectangle(bfhdc, G_MARGIN + state->settings.padding, textRect.top,
+                    state->width - G_MARGIN - state->settings.padding,
                     textRect.top + state->settings.fontSize);
           SetTextColor(bfhdc, state->settings.fgSelect);
         }
@@ -549,6 +561,29 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (idx == state->selectedResultIndex) {
           SetTextColor(bfhdc, state->settings.fg);
         }
+      }
+
+      // Scrollbar markers (non-interactable)
+      if (state->searchResultCount > state->lineCount) {
+        const int trackHeight = (int)state->height - entriesTop - state->settings.padding - G_MARGIN;
+        const int barH = max(10, trackHeight * (int)state->lineCount / (int)state->searchResultCount);
+        const int barY = entriesTop + (trackHeight - barH) * (int)pageStartI / (int)(state->searchResultCount - state->lineCount);
+
+        // Draw outline (window background color)
+        SetDCPenColor(bfhdc, state->settings.bg);
+        SetDCBrushColor(bfhdc, state->settings.bg);
+        // Left bar outline
+        Rectangle(bfhdc, G_MARGIN / 2 - 1, barY - 1, G_MARGIN / 2 + 3, barY + barH + 1);
+        // Right bar outline
+        Rectangle(bfhdc, (int)state->width - G_MARGIN / 2 - 3, barY - 1, (int)state->width - G_MARGIN / 2 + 1, barY + barH + 1);
+
+        // Draw thumb (selected color)
+        SetDCPenColor(bfhdc, state->settings.bgSelect);
+        SetDCBrushColor(bfhdc, state->settings.bgSelect);
+        // Left bar
+        Rectangle(bfhdc, G_MARGIN / 2, barY, G_MARGIN / 2 + 2, barY + barH);
+        // Right bar
+        Rectangle(bfhdc, (int)state->width - G_MARGIN / 2 - 2, barY, (int)state->width - G_MARGIN / 2, barY + barH);
       }
     }
 
@@ -618,7 +653,7 @@ void createWindow(state_t *state) {
   GetCursorPos(&cursorPos);
   HMONITOR hMonitor = MonitorFromPoint(cursorPos, MONITOR_DEFAULTTOPRIMARY);
   MONITORINFO mi = {.cbSize = sizeof(MONITORINFO)};
-  GetMonitorInfoA(hMonitor, &mi);
+  GetMonitorInfoW(hMonitor, &mi);
 
   const int displayWidth = mi.rcMonitor.right - mi.rcMonitor.left;
   const int displayHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
@@ -638,6 +673,10 @@ void createWindow(state_t *state) {
     state->height = state->settings.fontSize * (state->lineCount + 1) +
                     state->settings.padding * 2;
   }
+
+  // Expand for gutter
+  state->width += G_MARGIN * 2;
+  state->height += G_MARGIN * 2;
 
   int x = 0, y = 0;
   if (state->settings.centerWindow) {
@@ -661,7 +700,7 @@ void createWindow(state_t *state) {
     };
     const HDC tmpHDC = CreateCompatibleDC(NULL);
     SelectObject(tmpHDC, state->font);
-    DrawTextA(tmpHDC, state->settings.promptText, -1, &promptRect,
+    DrawTextW(tmpHDC, state->settings.promptText, -1, &promptRect,
               DRAWTEXT_PARAMS | DT_CALCRECT);
     DeleteDC(tmpHDC);
     state->promptWidth = promptRect.right - promptRect.left +
@@ -679,13 +718,13 @@ void createWindow(state_t *state) {
     textboxWidth = state->settings.inputWidth;
   } else {
     textboxLeft = state->settings.padding + state->promptWidth;
-    textboxWidth = state->width - textboxLeft - state->settings.padding;
+    textboxWidth = state->width - (textboxLeft + G_MARGIN) - state->settings.padding - G_MARGIN;
   }
 
   state->editWnd = CreateWindowExW(
       0, L"EDIT", L"",
       WS_VISIBLE | WS_CHILD | ES_LEFT | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-      textboxLeft, state->settings.padding, textboxWidth,
+      textboxLeft + G_MARGIN, state->settings.padding + G_MARGIN, textboxWidth,
       state->settings.fontSize, state->mainWnd, (HMENU)101, 0, 0);
   ASSERT_WIN32_RESULT(state->editWnd);
 
@@ -698,8 +737,8 @@ void createWindow(state_t *state) {
                                                  (LONG_PTR)&editWndProc);
 
   // Add state pointer
-  SetWindowLongPtrA(state->mainWnd, GWLP_USERDATA, (LONG_PTR)state);
-  SetWindowLongPtrA(state->editWnd, GWLP_USERDATA, (LONG_PTR)state);
+  SetWindowLongPtrW(state->mainWnd, GWLP_USERDATA, (LONG_PTR)state);
+  SetWindowLongPtrW(state->editWnd, GWLP_USERDATA, (LONG_PTR)state);
 
   // Remove default window styling
   LONG lStyle = GetWindowLong(state->mainWnd, GWL_STYLE);
@@ -727,8 +766,8 @@ void parseStdinEntries(state_t *state) {
   // Convert to utf16
   const size_t charCount =
       MultiByteToWideChar(CP_UTF8, 0, stdinUtf8.data, stdinUtf8.count, 0, 0);
-  wchar_t *stdinUtf16 = xrealloc(0, charCount * 2 + 1);
-  memset(stdinUtf16, 0, charCount * 2 + 1);
+  wchar_t *stdinUtf16 = xrealloc(0, (charCount + 1) * sizeof(wchar_t));
+  memset(stdinUtf16, 0, (charCount + 1) * sizeof(wchar_t));
   MultiByteToWideChar(CP_UTF8, 0, stdinUtf8.data, stdinUtf8.count, stdinUtf16,
                       charCount);
   free(stdinUtf8.data);
@@ -738,10 +777,17 @@ void parseStdinEntries(state_t *state) {
   buf_t entryBuf = {0};
   size_t lineStartI = 0;
   for (size_t i = 0; i < charCount; i++) {
-    if (stdinUtf16[i] == '\n' || i == charCount - 1) {
+    if (stdinUtf16[i] == L'\r') {
+      stdinUtf16[i] = L' '; // Strip carriage returns
+    }
+    if (stdinUtf16[i] == L'\n' || i == charCount - 1) {
       bufAdd(&entryBuf, sizeof(wchar_t *));
       ((wchar_t **)entryBuf.data)[state->entryCount] = &stdinUtf16[lineStartI];
-      stdinUtf16[i + (stdinUtf16[i] != '\n')] = 0; // set null terminator
+      if (stdinUtf16[i] == L'\n') {
+        stdinUtf16[i] = 0;
+      } else if (i == charCount - 1) {
+        stdinUtf16[i + 1] = 0;
+      }
       lineStartI = i + 1;
       state->entryCount++;
     }
@@ -754,8 +800,16 @@ void parseStdinEntries(state_t *state) {
 }
 
 void loadFont(state_t *state) {
-  state->font = CreateFontA(state->settings.fontSize, 0, 0, 0, FW_NORMAL, 0, 0,
-                            0, 0, 0, 0, 0x04, 0, state->settings.fontName);
+  LOGFONTW lf = {0};
+  lf.lfHeight = state->settings.fontSize; // Positive height matches cell height (matches CreateFontA behavior)
+  lf.lfWeight = FW_NORMAL;
+  lf.lfCharSet = DEFAULT_CHARSET;
+  lf.lfOutPrecision = OUT_TT_ONLY_PRECIS;
+  lf.lfQuality = CLEARTYPE_QUALITY;
+  lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+  wcsncpy(lf.lfFaceName, state->settings.fontName, LF_FACESIZE - 1);
+
+  state->font = CreateFontIndirectW(&lf);
   ASSERT_WIN32_RESULT(state->font);
 }
 
@@ -783,20 +837,20 @@ COLORREF blendColor(COLORREF foreground, COLORREF background, int alpha) {
   return RGB(r, g, b);
 }
 
-COLORREF parseColor(char *str, int *outAlpha) {
-  if (str[0] == '#') {
+COLORREF parseColor(wchar_t *str, int *outAlpha) {
+  if (str[0] == L'#') {
     str++;
   }
 
-  size_t len = strlen(str);
+  size_t len = wcslen(str);
   if (len != 6 && len != 8) {
-    fprintf(stderr, "Invalid color format, expected 6 or 8 digit hexadecimal "
-                    "(RRGGBB or RRGGBBAA).\n");
+    fwprintf(stderr, L"Invalid color format, expected 6 or 8 digit hexadecimal "
+                     L"(RRGGBB or RRGGBBAA).\n");
     exit(1);
   }
 
   // Parse the hex value
-  unsigned long color = strtol(str, 0, 16);
+  unsigned long color = wcstoul(str, 0, 16);
 
   // Extract alpha if present (last 2 digits)
   if (len == 8) {
@@ -807,8 +861,8 @@ COLORREF parseColor(char *str, int *outAlpha) {
   }
 
   // Windows colors are BGR, swap R and B
-  char *raw = (char *)&color;
-  const char tmp = raw[0];
+  unsigned char *raw = (unsigned char *)&color;
+  const unsigned char tmp = raw[0];
   raw[0] = raw[2];
   raw[2] = tmp;
 
@@ -867,7 +921,13 @@ void usage(void) {
   exit(1);
 }
 
-int main(int argc, char **argv) {
+int main(void) {
+  // Set console to UTF-8
+  SetConsoleOutputCP(CP_UTF8);
+
+  int argc;
+  wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
   // Turn off stdout buffering
   setvbuf(stdout, 0, _IONBF, 0);
 
@@ -881,13 +941,13 @@ int main(int argc, char **argv) {
               .padding = 4,
               .filterMode = FM_COMPLETE,
               .caseSensitiveSearch = false,
-              .bg = parseColor("#000000", &bgAlpha),
-              .fg = parseColor("#ffffff", &fgAlpha),
-              .bgSelect = parseColor("#ffffff", &bgSelectAlpha),
-              .fgSelect = parseColor("#000000", &fgSelectAlpha),
-              .bgEdit = parseColor("#111111", &bgEditAlpha),
-              .fgEdit = parseColor("#ffffff", &fgEditAlpha),
-              .fontName = "Courier New",
+              .bg = parseColor(L"#000000", &bgAlpha),
+              .fg = parseColor(L"#ffffff", &fgAlpha),
+              .bgSelect = parseColor(L"#ffffff", &bgSelectAlpha),
+              .fgSelect = parseColor(L"#000000", &fgSelectAlpha),
+              .bgEdit = parseColor(L"#111111", &bgEditAlpha),
+              .fgEdit = parseColor(L"#ffffff", &fgEditAlpha),
+              .fontName = L"Courier New",
               .fontSize = 24,
               .lineCount = 15,
           },
@@ -904,75 +964,73 @@ int main(int argc, char **argv) {
   // Parse arguments
   for (int i = 1; i < argc; i++) {
     // Flags
-    if (!strcmp(argv[i], "-h")) {
+    if (!wcscmp(argv[i], L"-h")) {
       usage();
-    } else if (!strcmp(argv[i], "-cs")) {
+    } else if (!wcscmp(argv[i], L"-cs")) {
       state.settings.caseSensitiveSearch = true;
-    } else if (!strcmp(argv[i], "-id")) {
+    } else if (!wcscmp(argv[i], L"-id")) {
       state.settings.outputIndex = true;
-    } else if (!strcmp(argv[i], "-hl")) {
+    } else if (!wcscmp(argv[i], L"-hl")) {
       state.settings.horizontalLayout = true;
-      state.settings.inputWidth = atoi(argv[++i]);
+      state.settings.inputWidth = _wtoi(argv[++i]);
       if (state.settings.inputWidth < 1) {
         usage();
       }
     } else if (i + 1 == argc) {
       usage();
       // Options
-    } else if (!strcmp(argv[i], "-l")) {
-      state.settings.lineCount = atoi(argv[++i]);
+    } else if (!wcscmp(argv[i], L"-l")) {
+      state.settings.lineCount = _wtoi(argv[++i]);
       if (state.settings.lineCount < 1) {
         usage();
       }
-    } else if (!strcmp(argv[i], "-p")) {
-      // TODO: encoding for windows arugments is strange
-      //       look into using `wmain` or `GetCommandLineW`
+    } else if (!wcscmp(argv[i], L"-p")) {
       state.settings.promptText = argv[++i];
-    } else if (!strcmp(argv[i], "-fm")) {
-      const char *modeStr = argv[++i];
-      if (!strcmp(modeStr, "complete")) {
+    } else if (!wcscmp(argv[i], L"-fm")) {
+      const wchar_t *modeStr = argv[++i];
+      if (!wcscmp(modeStr, L"complete")) {
         state.settings.filterMode = FM_COMPLETE;
-      } else if (!strcmp(modeStr, "keywords")) {
+      } else if (!wcscmp(modeStr, L"keywords")) {
         state.settings.filterMode = FM_KEYWORDS;
       } else {
         usage();
       }
-    } else if (!strcmp(argv[i], "-si")) {
-      state.settings.selectedIndex = atoi(argv[++i]);
+    } else if (!wcscmp(argv[i], L"-si")) {
+      state.settings.selectedIndex = _wtoi(argv[++i]);
       if (state.settings.selectedIndex < 0) {
         usage();
       }
-    } else if (!strcmp(argv[i], "-px")) {
-      state.settings.padding = atoi(argv[++i]);
+    } else if (!wcscmp(argv[i], L"-px")) {
+      state.settings.padding = _wtoi(argv[++i]);
       if (state.settings.padding < 0) {
         usage();
       }
-    } else if (!strcmp(argv[i], "-wx")) {
-      state.settings.width = atoi(argv[++i]);
+    } else if (!wcscmp(argv[i], L"-wx")) {
+      state.settings.width = _wtoi(argv[++i]);
       state.settings.centerWindow = true;
       if (state.settings.width < 1) {
         usage();
       }
-    } else if (!strcmp(argv[i], "-bg")) {
+    } else if (!wcscmp(argv[i], L"-bg")) {
       state.settings.bg = parseColor(argv[++i], &state.settings.bgAlpha);
-    } else if (!strcmp(argv[i], "-fg")) {
+    } else if (!wcscmp(argv[i], L"-fg")) {
       state.settings.fg = parseColor(argv[++i], &state.settings.fgAlpha);
-    } else if (!strcmp(argv[i], "-sbg")) {
+    } else if (!wcscmp(argv[i], L"-sbg")) {
       state.settings.bgSelect =
           parseColor(argv[++i], &state.settings.bgSelectAlpha);
-    } else if (!strcmp(argv[i], "-sfg")) {
+    } else if (!wcscmp(argv[i], L"-sfg")) {
       state.settings.fgSelect =
           parseColor(argv[++i], &state.settings.fgSelectAlpha);
-    } else if (!strcmp(argv[i], "-tbg")) {
+    } else if (!wcscmp(argv[i], L"-tbg")) {
       state.settings.bgEdit =
           parseColor(argv[++i], &state.settings.bgEditAlpha);
-    } else if (!strcmp(argv[i], "-tfg")) {
+    } else if (!wcscmp(argv[i], L"-tfg")) {
       state.settings.fgEdit =
           parseColor(argv[++i], &state.settings.fgEditAlpha);
-    } else if (!strcmp(argv[i], "-f")) {
+    } else if (!wcscmp(argv[i], L"-f")) {
       state.settings.fontName = argv[++i];
-    } else if (!strcmp(argv[i], "-fs")) {
-      state.settings.fontSize = atoi(argv[++i]);
+    } else if (!wcscmp(argv[i], L"-fs")) {
+      state.settings.fontSize = _wtoi(argv[++i]);
       if (state.settings.fontSize < 1) {
         usage();
       }
