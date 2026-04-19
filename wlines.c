@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <fcntl.h>
+#include <io.h>
 
 #define ASSERT_WIN32_RESULT(result)                                            \
   do {                                                                         \
@@ -602,13 +604,41 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   case WM_CLOSE:
     exit(1);
   case WM_LBUTTONDOWN:;
-    const int mx = GET_Y_LPARAM(lparam);
-    if (mx < entriesTop) {
-      return 0;
+    const int mouseX = GET_X_LPARAM(lparam);
+    const int mouseY = GET_Y_LPARAM(lparam);
+    size_t newIdx = state->selectedResultIndex;
+
+    if (state->settings.horizontalLayout) {
+      const int itemsStartX = G_MARGIN + state->settings.padding + state->promptWidth +
+                              state->settings.inputWidth +
+                              state->settings.padding;
+      const int itemWidth = 135;
+      const int availableWidth =
+          state->width - itemsStartX - state->settings.padding - G_MARGIN;
+      const int itemsPerPage = max(1, availableWidth / itemWidth);
+      const size_t pageStartIdx =
+          (state->selectedResultIndex / itemsPerPage) * itemsPerPage;
+
+      if (mouseX >= itemsStartX) {
+        const int itemClicked = (mouseX - itemsStartX) / itemWidth;
+        if (itemClicked < itemsPerPage) {
+          newIdx = pageStartIdx + itemClicked;
+          if (newIdx >= state->searchResultCount) {
+            newIdx = state->searchResultCount - 1;
+          }
+        }
+      }
+    } else {
+      if (mouseY >= entriesTop) {
+        newIdx = pageStartI + (mouseY - entriesTop) / state->settings.fontSize;
+        if (newIdx >= state->searchResultCount) {
+          newIdx = state->searchResultCount - 1;
+        }
+      } else {
+        return 0;
+      }
     }
-    const size_t newIdx =
-        max(0, min(state->searchResultCount - 1,
-                   pageStartI + (mx - entriesTop) / state->settings.fontSize));
+
     if (newIdx == state->selectedResultIndex) {
       if (state->settings.outputIndex) {
         printf("%zu\n", state->searchResults[state->selectedResultIndex]);
@@ -924,6 +954,10 @@ void usage(void) {
 int main(void) {
   // Set console to UTF-8
   SetConsoleOutputCP(CP_UTF8);
+
+  // Set stdin and stdout to binary mode to avoid CRLF translation
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
 
   int argc;
   wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
