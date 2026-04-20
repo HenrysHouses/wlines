@@ -455,15 +455,11 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   }
 
   const int verticalSpacing = state->settings.horizontalLayout ? 0 : 4;
-  const int bp = state->settings.border ? state->settings.borderPadding : 0;
-  const RECT wx = { .left = bp + G_MARGIN + state->settings.padding,
-                    .top = bp + G_MARGIN + state->settings.padding,
-                    .right = (int)state->width - (bp + G_MARGIN + state->settings.padding),
-                    .bottom = (int)state->height - (bp + G_MARGIN + state->settings.padding) };
-  const int contentWidth = wx.right - wx.left;
-  const int contentHeight = wx.bottom - wx.top;
-  const int entriesTop = wx.top + LINE_HEIGHT(state->settings.fontSize) + verticalSpacing;
-  const size_t page = state->lineCount ? (state->selectedResultIndex / state->lineCount) : 0;
+  const int co = state->settings.border ? state->settings.borderPadding : 0;
+  const int entriesTop = co + LINE_HEIGHT(state->settings.fontSize) +
+                         state->settings.padding + G_MARGIN + verticalSpacing;
+  const size_t page =
+      state->lineCount ? (state->selectedResultIndex / state->lineCount) : 0;
   const size_t pageStartI = page * state->lineCount;
 
   switch (msg) {
@@ -480,6 +476,10 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     break;
   case WM_PAINT:; // Paint window
     debug_log("WM_PAINT start, mainWnd=%p, size=%zu x %zu", state->mainWnd, state->width, state->height);
+    // Compute entriesTop for logging (recompute same as above)
+    const int verticalSpacing_log = state->settings.horizontalLayout ? 0 : 4;
+    const int co_log = state->settings.border ? state->settings.borderPadding : 0;
+    const int entriesTop_log = co_log + LINE_HEIGHT(state->settings.fontSize) + state->settings.padding + G_MARGIN + verticalSpacing_log;
     // Begin
     PAINTSTRUCT ps = {0};
     HDC real_hdc = BeginPaint(wnd, &ps);
@@ -519,18 +519,21 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       if (state->settings.horizontalLayout) {
         // Horizontal: prompt on left side only
         promptRect = (RECT){
-            .left = wx.left + FONT_HMARGIN(state->settings.fontSize),
-            .top = wx.top,
-            .right = wx.left + state->promptWidth - FONT_HMARGIN(state->settings.fontSize),
-            .bottom = wx.top + LINE_HEIGHT(state->settings.fontSize),
+            .left = co + G_MARGIN + state->settings.padding +
+                    FONT_HMARGIN(state->settings.fontSize),
+            .top = co + G_MARGIN + state->settings.padding,
+            .right = co + G_MARGIN + state->settings.padding + state->promptWidth -
+                     FONT_HMARGIN(state->settings.fontSize),
+            .bottom = co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize),
         };
       } else {
         // Vertical: prompt takes half width
         promptRect = (RECT){
-            .left = wx.left + FONT_HMARGIN(state->settings.fontSize),
-            .top = wx.top,
-            .right = wx.left + contentWidth/2 - FONT_HMARGIN(state->settings.fontSize),
-            .bottom = wx.top + LINE_HEIGHT(state->settings.fontSize),
+            .left = co + G_MARGIN + state->settings.padding +
+                    FONT_HMARGIN(state->settings.fontSize),
+            .top = co + G_MARGIN + state->settings.padding,
+            .right = state->width / 2 - FONT_HMARGIN(state->settings.fontSize),
+            .bottom = co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize),
         };
       }
 
@@ -541,17 +544,17 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       SetDCBrushColor(g_bfhdc, promptBg);
 
       // Draw background for prompt width area
-      Rectangle(g_bfhdc, wx.left, wx.top,
-                wx.left + state->promptWidth,
-                wx.top + LINE_HEIGHT(state->settings.fontSize));
+      Rectangle(g_bfhdc, co + G_MARGIN + state->settings.padding, co + G_MARGIN + state->settings.padding,
+                co + G_MARGIN + state->settings.padding + state->promptWidth,
+                co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
 
       // Draw outline for prompt in blur mode if transparent
       if (promptTransparent) {
         SetDCPenColor(g_bfhdc, state->settings.bgSelect);
         HGDIOBJ oldBrush = SelectObject(g_bfhdc, GetStockObject(HOLLOW_BRUSH));
-        Rectangle(g_bfhdc, wx.left, wx.top,
-                  wx.left + state->promptWidth,
-                  wx.top + LINE_HEIGHT(state->settings.fontSize));
+        Rectangle(g_bfhdc, co + G_MARGIN + state->settings.padding, co + G_MARGIN + state->settings.padding,
+                  co + G_MARGIN + state->settings.padding + state->promptWidth,
+                  co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize));
         SelectObject(g_bfhdc, oldBrush);
       }
 
@@ -561,15 +564,15 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     // Draw input field background/outline
-    const int scrollbarWidth = 10; // Reserve space for scrollbar
+    const int scrollbarWidth = 5; // Reserve space for scrollbar
 
-    // Calculate textbox bounds within content rect so both modes align
-    int tbLeft = wx.left - G_MARGIN + state->promptWidth;
+    // Calculate textbox bounds regardless of blur mode so both modes align
+    int tbLeft = co + state->settings.padding + state->promptWidth;
     size_t tbWidth;
     if (state->settings.horizontalLayout) {
       tbWidth = state->settings.inputWidth;
     } else {
-      tbWidth = contentWidth - state->promptWidth - G_MARGIN - scrollbarWidth;
+      tbWidth = state->contentWidth - state->promptWidth - state->settings.padding - 2 * G_MARGIN - scrollbarWidth;
     }
 
     const bool editTransparent = state->settings.blur && state->settings.bgEditAlpha < 255;
@@ -578,7 +581,7 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       if (editTransparent) {
         HPEN hPen = CreatePen(PS_SOLID, 1, state->settings.bgEdit);
         HGDIOBJ oldPen = SelectObject(g_bfhdc, hPen);
-        int lineY = wx.top + LINE_HEIGHT(state->settings.fontSize) - 1;
+        int lineY = co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize) - 1;
         MoveToEx(g_bfhdc, tbLeft + G_MARGIN, lineY, NULL);
         LineTo(g_bfhdc, tbLeft + G_MARGIN + tbWidth, lineY);
         SelectObject(g_bfhdc, oldPen);
@@ -587,28 +590,27 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         // Draw outline only (no fill) to match underline dimensions
         SetDCPenColor(g_bfhdc, state->settings.bgEdit);
         HGDIOBJ oldBrush = SelectObject(g_bfhdc, GetStockObject(NULL_BRUSH));
-        Rectangle(g_bfhdc, tbLeft + G_MARGIN, wx.top,
-                  tbLeft + G_MARGIN + tbWidth, wx.top + LINE_HEIGHT(state->settings.fontSize) - 1);
+        Rectangle(g_bfhdc, tbLeft + G_MARGIN, co + G_MARGIN + state->settings.padding,
+                  tbLeft + G_MARGIN + tbWidth, co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize) - 1);
         SelectObject(g_bfhdc, oldBrush);
       }
     } else {
       // Non-blur mode: draw a filled input background using the same bounds
       SetDCPenColor(g_bfhdc, state->settings.bgEdit);
       SetDCBrushColor(g_bfhdc, state->settings.bgEdit);
-      Rectangle(g_bfhdc, tbLeft + G_MARGIN, wx.top,
-                tbLeft + G_MARGIN + tbWidth, wx.top + LINE_HEIGHT(state->settings.fontSize) - 1);
+      Rectangle(g_bfhdc, tbLeft + G_MARGIN, co + G_MARGIN + state->settings.padding,
+                tbLeft + G_MARGIN + tbWidth, co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize) - 1);
     }
 
     // Draw texts
-    int vScrollShown = !state->settings.horizontalLayout && state->searchResultCount > state->lineCount;
-    int textLeft = wx.left + FONT_HMARGIN(state->settings.fontSize) + (vScrollShown ? scrollbarWidth : 0);
     RECT textRect = {
-        .left = textLeft,
+        .left =
+            co + G_MARGIN + state->settings.padding + FONT_HMARGIN(state->settings.fontSize),
         .top = entriesTop,
-        .right = wx.right - G_MARGIN - scrollbarWidth - FONT_HMARGIN(state->settings.fontSize),
-        .bottom = wx.bottom - G_MARGIN,
+        .right = co + state->contentWidth - G_MARGIN - scrollbarWidth - FONT_HMARGIN(state->settings.fontSize),
+        .bottom = co + state->contentHeight - G_MARGIN,
     };
-    debug_log("layout: bp=%d entriesTop=%d contentHeight=%d textRect=[%d,%d,%d,%d] scrollbarWidth=%d", bp, entriesTop, contentHeight, textRect.left, textRect.top, textRect.right, textRect.bottom, scrollbarWidth);
+    debug_log("layout: co=%d entriesTop=%d contentHeight=%zu textRect=[%d,%d,%d,%d] scrollbarWidth=%d", co, entriesTop_log, state->contentHeight, textRect.left, textRect.top, textRect.right, textRect.bottom, scrollbarWidth);
     SetTextColor(g_bfhdc, state->settings.fg);
     const size_t count =
         min(state->lineCount, state->searchResultCount - pageStartI);
@@ -616,8 +618,11 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (state->settings.horizontalLayout) {
       // Horizontal layout: prompt on left, input field, then items displayed as
       // pages
-      const int itemsStartX = wx.left + state->promptWidth + state->settings.inputWidth + state->settings.padding;
-      const int availableWidth = wx.right - itemsStartX - state->settings.padding;
+      const int itemsStartX = co + G_MARGIN + state->settings.padding + state->promptWidth +
+                              state->settings.inputWidth +
+                              state->settings.padding;
+      const int availableWidth =
+          state->contentWidth + co/2 - itemsStartX - state->settings.padding - G_MARGIN;
       const int itemWidth = 135; // 120px item + 15px spacing
       const int hm = FONT_HMARGIN(state->settings.fontSize);
 
@@ -634,13 +639,13 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       size_t itemIdx;
       for (itemIdx = pageStartIdx;
            itemIdx < state->searchResultCount &&
-           currentX + itemWidth <= wx.right;
+           currentX + itemWidth <= (int)state->contentWidth + co/2;
            itemIdx++) {
         RECT itemRect = {
             .left = currentX + hm,
-            .top = wx.top + hm,
+            .top = co + G_MARGIN + state->settings.padding + hm,
             .right = currentX + 120 - hm,
-            .bottom = wx.bottom - hm,
+            .bottom = state->height - G_MARGIN - state->settings.padding - hm,
         };
 
         // Set text color and color background for selected
@@ -649,8 +654,8 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           COLORREF selBg = selTransparent ? state->settings.bg : state->settings.bgSelect;
           SetDCPenColor(g_bfhdc, selTransparent ? state->settings.fgSelect : selBg);
           SetDCBrushColor(g_bfhdc, selBg);
-          Rectangle(g_bfhdc, currentX, wx.top, currentX + 120 - G_MARGIN,
-                    wx.bottom - G_MARGIN);
+          Rectangle(g_bfhdc, currentX, co + G_MARGIN + state->settings.padding, currentX + 120 - G_MARGIN,
+                    co + state->contentHeight - G_MARGIN);
           SetTextColor(g_bfhdc, state->settings.fgSelect);
         } else {
           SetTextColor(g_bfhdc, state->settings.fg);
@@ -667,29 +672,25 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
       // Scrollbar markers (non-interactable)
       if (state->searchResultCount > (size_t)itemsPerPageSafe) {
-        const int listBottom_h = textRect.bottom;
+        const int listBottom_h = textRect.bottom - co;
         const int barW = max(10, availableWidth * itemsPerPageSafe / (int)state->searchResultCount);
-        
-        // Calculate max page start for horizontal layout to avoid over-extension
-        const size_t maxHPage = (state->searchResultCount - 1) / itemsPerPageSafe;
-        const size_t maxPageStartIdx = maxHPage * itemsPerPageSafe;
-        const int barX = itemsStartX + (maxPageStartIdx > 0 ? (availableWidth - barW) * (int)pageStartIdx / (int)maxPageStartIdx : 0);
+        const int barX = itemsStartX + (availableWidth - barW) * (int)pageStartIdx / (int)(state->searchResultCount - itemsPerPageSafe);
 
         // Draw outline (window background color)
         SetDCPenColor(g_bfhdc, state->settings.bg);
         SetDCBrushColor(g_bfhdc, state->settings.bg);
         // Top bar outline
-        Rectangle(g_bfhdc, barX - 1, wx.top - G_MARGIN / 2 - 1, barX + barW + 1, wx.top - G_MARGIN / 2 + 3);
+        Rectangle(g_bfhdc, barX - 1, co + G_MARGIN / 2 - 1, barX + barW + 1, co + G_MARGIN / 2 + 3);
         // Bottom bar outline (use adjusted listBottom)
-        Rectangle(g_bfhdc, barX - 1, listBottom_h + G_MARGIN / 2 - 3, barX + barW + 1, listBottom_h + G_MARGIN / 2 + 1);
+        Rectangle(g_bfhdc, barX - 1, listBottom_h - G_MARGIN / 2 - 3, barX + barW + 1, listBottom_h - G_MARGIN / 2 + 1);
 
         // Draw thumb (selected color)
         SetDCPenColor(g_bfhdc, state->settings.bgSelect);
         SetDCBrushColor(g_bfhdc, state->settings.bgSelect);
         // Top bar
-        Rectangle(g_bfhdc, barX, wx.top - G_MARGIN / 2, barX + barW, wx.top - G_MARGIN / 2 + 2);
+        Rectangle(g_bfhdc, barX, co + G_MARGIN / 2, barX + barW, co + G_MARGIN / 2 + 2);
         // Bottom bar
-        Rectangle(g_bfhdc, barX, listBottom_h + G_MARGIN / 2 - 2, barX + barW, listBottom_h + G_MARGIN / 2);
+        Rectangle(g_bfhdc, barX, listBottom_h - G_MARGIN / 2 - 2, barX + barW, listBottom_h - G_MARGIN / 2);
       }
     } else {
       // Vertical layout (original behavior)
@@ -700,8 +701,8 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           COLORREF selBg = selTransparent ? state->settings.bg : state->settings.bgSelect;
           SetDCPenColor(g_bfhdc, selTransparent ? state->settings.fgSelect : selBg);
           SetDCBrushColor(g_bfhdc, selBg);
-          Rectangle(g_bfhdc, wx.left, textRect.top,
-                    wx.right - G_MARGIN - scrollbarWidth,
+          Rectangle(g_bfhdc, co + G_MARGIN + state->settings.padding, textRect.top,
+                    co + state->contentWidth - G_MARGIN - scrollbarWidth,
                     textRect.top + LINE_HEIGHT(state->settings.fontSize));
           SetTextColor(g_bfhdc, state->settings.fgSelect);
         }
@@ -723,36 +724,29 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
       // Scrollbar markers (non-interactable)
       if (state->searchResultCount > state->lineCount) {
-        // Use the actual height of the items for the scrollbar track
-        const int listHeight = (int)state->lineCount * LINE_HEIGHT(state->settings.fontSize);
-        const int listBottom = entriesTop + listHeight;
-        const int trackHeight = listHeight;
-        
-        // Calculate the maximum possible pageStartI to use as denominator
-        const size_t maxPage = (state->searchResultCount - 1) / state->lineCount;
-        const size_t maxPageStartI = maxPage * state->lineCount;
-        
+        // Use textRect.bottom as canonical list bottom to ensure consistent offsets
+        const int listBottom = textRect.bottom - co; // subtract outline padding to avoid touching border
+        const int trackHeight = listBottom - entriesTop;
         const int barH = max(10, trackHeight * (int)state->lineCount / (int)state->searchResultCount);
-        const int barY = entriesTop + (maxPageStartI > 0 ? (trackHeight - barH) * (int)pageStartI / (int)maxPageStartI : 0);
+        const int barY = entriesTop + (trackHeight - barH) * (int)pageStartI / (int)(state->searchResultCount - state->lineCount);
 
-        debug_log("scrollbar vertical: entriesTop=%d listBottom=%d trackHeight=%d barH=%d barY=%d pageStartI=%zu maxPageStartI=%zu searchResultCount=%zu lineCount=%d", 
-                  entriesTop, listBottom, trackHeight, barH, barY, pageStartI, maxPageStartI, state->searchResultCount, state->lineCount);
+        debug_log("scrollbar vertical: entriesTop=%d textRect.bottom=%d listBottom=%d trackHeight=%d barH=%d barY=%d pageStartI=%zu searchResultCount=%zu lineCount=%d", entriesTop_log, textRect.bottom, listBottom, trackHeight, barH, barY, pageStartI, state->searchResultCount, state->lineCount);
 
         // Draw outline (window background color)
         SetDCPenColor(g_bfhdc, state->settings.bg);
         SetDCBrushColor(g_bfhdc, state->settings.bg);
         // Left bar outline (at left edge of items)
-        Rectangle(g_bfhdc, wx.left - 1, barY - 1, wx.left + 3, barY + barH + 1);
+        Rectangle(g_bfhdc, co + G_MARGIN - 1, barY - 1, co + G_MARGIN + 3, barY + barH + 1);
         // Right bar outline (at right edge of items)
-        Rectangle(g_bfhdc, wx.right - G_MARGIN - 3, barY - 1, wx.right - G_MARGIN + 1, barY + barH + 1);
+        Rectangle(g_bfhdc, co + state->contentWidth - G_MARGIN - 3, barY - 1, co + state->contentWidth - G_MARGIN + 1, barY + barH + 1);
 
         // Draw thumb (selected color)
         SetDCPenColor(g_bfhdc, state->settings.bgSelect);
         SetDCBrushColor(g_bfhdc, state->settings.bgSelect);
         // Left bar
-        Rectangle(g_bfhdc, wx.left, barY, wx.left + 2, barY + barH);
+        Rectangle(g_bfhdc, co + G_MARGIN, barY, co + G_MARGIN + 2, barY + barH);
         // Right bar
-        Rectangle(g_bfhdc, wx.right - G_MARGIN - 2, barY, wx.right - G_MARGIN, barY + barH);
+        Rectangle(g_bfhdc, co + state->contentWidth - G_MARGIN - 2, barY, co + state->contentWidth - G_MARGIN, barY + barH);
       }
     }
 
@@ -778,12 +772,16 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     size_t newIdx = state->selectedResultIndex;
 
     if (state->settings.horizontalLayout) {
-      if (mouseY < wx.top || mouseY > wx.top + LINE_HEIGHT(state->settings.fontSize)) {
+      if (mouseY < (int)(co + G_MARGIN + state->settings.padding) || 
+          mouseY > (int)(co + G_MARGIN + state->settings.padding + LINE_HEIGHT(state->settings.fontSize))) {
         return 0;
       }
-      const int itemsStartX = wx.left + state->promptWidth + state->settings.inputWidth + state->settings.padding;
+      const int itemsStartX = co + G_MARGIN + state->settings.padding + state->promptWidth +
+                              state->settings.inputWidth +
+                              state->settings.padding;
       const int itemWidth = 135;
-      const int availableWidth = wx.right - itemsStartX - state->settings.padding;
+      const int availableWidth =
+          state->contentWidth + co/2 - itemsStartX - state->settings.padding - G_MARGIN;
       const int itemsPerPage = max(1, availableWidth / itemWidth);
       const size_t pageStartIdx =
           (state->selectedResultIndex / itemsPerPage) * itemsPerPage;
@@ -973,14 +971,8 @@ void createWindow(state_t *state) {
                          FONT_HMARGIN(state->settings.fontSize) * 2;
   }
 
-  // Create textbox inside content rect (wx)
-  const int bp = state->settings.border ? state->settings.borderPadding : 0;
-  const RECT wx = { .left = bp + G_MARGIN + state->settings.padding,
-                    .top = bp + G_MARGIN + state->settings.padding,
-                    .right = (int)state->width - (bp + G_MARGIN + state->settings.padding),
-                    .bottom = (int)state->height - (bp + G_MARGIN + state->settings.padding) };
-  const int contentWidthLocal = wx.right - wx.left;
-
+  // Create textbox
+  const int co = state->settings.border ? state->settings.borderPadding : 0;
   size_t textboxLeft;
   size_t textboxWidth;
 
@@ -989,15 +981,13 @@ void createWindow(state_t *state) {
     textboxWidth = state->settings.inputWidth;
   } else {
     textboxLeft = state->settings.padding + state->promptWidth;
-    textboxWidth = contentWidthLocal - textboxLeft - G_MARGIN;
+    textboxWidth = state->contentWidth - textboxLeft - G_MARGIN;
   }
 
-  const int editX = wx.left + (int)state->promptWidth;
-  const int editY = wx.top;
   state->editWnd = CreateWindowExW(
       0, L"EDIT", L"",
       WS_VISIBLE | WS_CHILD | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL,
-      editX, editY, (int)textboxWidth,
+      co + textboxLeft + G_MARGIN, co + state->settings.padding + G_MARGIN, textboxWidth,
       LINE_HEIGHT(state->settings.fontSize) - 1, state->mainWnd, (HMENU)101, 0, 0);
   ASSERT_WIN32_RESULT(state->editWnd);
   debug_log("createWindow: editWnd=%p textboxLeft=%zu textboxWidth=%zu", state->editWnd, textboxLeft, textboxWidth);
