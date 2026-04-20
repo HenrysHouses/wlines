@@ -700,8 +700,12 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           COLORREF selBg = selTransparent ? state->settings.bg : state->settings.bgSelect;
           SetDCPenColor(g_bfhdc, selTransparent ? state->settings.fgSelect : selBg);
           SetDCBrushColor(g_bfhdc, selBg);
-          Rectangle(g_bfhdc, wx.left, textRect.top,
-                    wx.right - G_MARGIN - scrollbarWidth,
+          
+          // Offset selection rectangle to match text offset
+          int selLeft = wx.left + (vScrollShown ? scrollbarWidth : 0);
+          int selRight = wx.right - G_MARGIN - scrollbarWidth;
+          
+          Rectangle(g_bfhdc, selLeft, textRect.top, selRight,
                     textRect.top + LINE_HEIGHT(state->settings.fontSize));
           SetTextColor(g_bfhdc, state->settings.fgSelect);
         }
