@@ -39,6 +39,7 @@
   } while (0);
 
 static void debug_log(const char *fmt, ...) {
+#ifdef DEBUG
   FILE *f = fopen("wlines_debug.log", "a");
   if (!f) return;
   time_t t = time(NULL);
@@ -52,6 +53,9 @@ static void debug_log(const char *fmt, ...) {
   va_end(ap);
   fprintf(f, "\n");
   fclose(f);
+#else
+  (void)fmt;
+#endif
 }
 
 static LONG WINAPI unhandled_exception_handler(EXCEPTION_POINTERS *ep) {
@@ -144,6 +148,10 @@ void cleanup(void) {
 }
 
 void *xrealloc(void *ptr, size_t sz) {
+  if (sz == 0) {
+    free(ptr);
+    return NULL;
+  }
   ptr = realloc(ptr, sz);
   if (!ptr) {
     fprintf(stderr, "Out of memory\n");
@@ -454,7 +462,6 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProc(wnd, msg, wparam, lparam);
   }
 
-  const int verticalSpacing = state->settings.horizontalLayout ? 0 : 4;
   const int bp = state->settings.border ? state->settings.borderPadding : 0;
   const RECT wx = { .left = bp + G_MARGIN + state->settings.padding,
                     .top = bp + G_MARGIN + state->settings.padding,
@@ -462,9 +469,11 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     .bottom = (int)state->height - (bp + G_MARGIN + state->settings.padding) };
   const int contentWidth = wx.right - wx.left;
   const int contentHeight = wx.bottom - wx.top;
-  const int entriesTop = wx.top + LINE_HEIGHT(state->settings.fontSize) + verticalSpacing;
-  const size_t page = state->lineCount ? (state->selectedResultIndex / state->lineCount) : 0;
+  const size_t page = (state->lineCount && state->searchResultCount > 0 && state->selectedResultIndex != SELECTED_INDEX_NO_RESULT) 
+                      ? (state->selectedResultIndex / state->lineCount) : 0;
   const size_t pageStartI = page * state->lineCount;
+  const int effectiveVerticalSpacing = (state->settings.horizontalLayout || state->lineCount == 0 || state->searchResultCount == 0) ? 0 : 4;
+  const int entriesTop = wx.top + LINE_HEIGHT(state->settings.fontSize) + effectiveVerticalSpacing;
 
   switch (msg) {
   case WM_TIMER: // Repeating timer to make sure we're the foreground window
@@ -868,7 +877,7 @@ void createWindow(state_t *state) {
     state->contentWidth = displayWidth;
   }
 
-  const int verticalSpacing = state->settings.horizontalLayout ? 0 : 4;
+  const int verticalSpacing = (state->settings.horizontalLayout || state->lineCount == 0) ? 0 : 4;
   if (state->settings.horizontalLayout) {
     state->contentHeight = LINE_HEIGHT(state->settings.fontSize) + state->settings.padding * 2 + G_MARGIN * 2;
   } else {
@@ -1042,6 +1051,15 @@ void createWindow(state_t *state) {
 }
 
 void parseStdinEntries(state_t *state) {
+  // If stdin is a terminal, don't wait for input - assume empty list
+  if (_isatty(_fileno(stdin))) {
+    state->stdinUtf16 = NULL;
+    state->entryCount = 0;
+    state->entries = NULL;
+    state->searchResults = NULL;
+    return;
+  }
+
   // Read utf8 stdin
   char buf[1024];
   buf_t stdinUtf8 = {0};
@@ -1350,8 +1368,12 @@ int main(void) {
   createWindow(&state);
   debug_log("createWindow returned mainWnd=%p contentWidth=%zu contentHeight=%zu", state.mainWnd, state.contentWidth, state.contentHeight);
   updateSearchResults(&state);
-  state.selectedResultIndex =
-      min((size_t)state.settings.selectedIndex, state.entryCount - 1);
+  if (state.entryCount > 0) {
+    state.selectedResultIndex =
+        min((size_t)state.settings.selectedIndex, state.entryCount - 1);
+  } else {
+    state.selectedResultIndex = SELECTED_INDEX_NO_RESULT;
+  }
   windowEventLoop();
 
   return 1;
