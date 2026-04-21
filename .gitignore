@@ -3,5 +3,6 @@ compile_commands.json
 .cache/
 test.sh
 wlines.backup*
+wlines.bak*
 wlines.c.*
 *.log
