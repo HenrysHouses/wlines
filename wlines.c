@@ -100,6 +100,18 @@ typedef struct {
   bool border;
   COLORREF borderColor;
   int borderPadding;
+  int fontQuality;
+  COLORREF bgAntialias;
+  bool hasBgAntialias;
+  COLORREF acrylicColor;
+  bool hasAcrylicColor;
+  int acrylicAlpha;
+  COLORREF outlineColor;
+  bool hasOutline;
+  bool autoOutline;
+  COLORREF autoAcrylicColor;
+  bool hasAutoAcrylicColor;
+  int autoAcrylicAlpha;
 } settings_t;
 
 typedef struct {
@@ -125,6 +137,7 @@ typedef struct {
   size_t searchResultCount;
   size_t *searchResults;      // index into `entries`
   size_t selectedResultIndex; // index into `searchResults`
+  wchar_t *prevSearch;
 } state_t;
 
 state_t *g_state = NULL;
@@ -144,6 +157,7 @@ void cleanup(void) {
     if (g_state->entries) free(g_state->entries);
     if (g_state->searchResults) free(g_state->searchResults);
     if (g_state->textboxBuf.data) free(g_state->textboxBuf.data);
+    if (g_state->prevSearch) free(g_state->prevSearch);
   }
 }
 
@@ -247,7 +261,7 @@ void filterReduceByStr(state_t *state, const wchar_t *str) {
 void filterReduceByKeywords(state_t *state, wchar_t *str) {
   // Iterate words and reduce results
   wchar_t *space;
-  while ((space = StrStrW(str, L" "))) {
+  while ((space = wcschr(str, L' '))) {
     space[0] = 0;
     filterReduceByStr(state, str);
     str = space + 1;
@@ -256,22 +270,38 @@ void filterReduceByKeywords(state_t *state, wchar_t *str) {
 }
 
 void updateSearchResults(state_t *state) {
-  // Put all entries into results
-  state->searchResultCount = state->entryCount;
-  for (size_t i = 0; i < state->entryCount; i++) {
-    state->searchResults[i] = i;
+  wchar_t *str = getTextboxString(state);
+  if (state->prevSearch && wcscmp(str, state->prevSearch) == 0) {
+    return;
   }
 
-  // Filter by chosen method
-  wchar_t *str = getTextboxString(state);
-  switch (state->settings.filterMode) {
-  case FM_COMPLETE:
-    filterReduceByStr(state, str);
-    break;
-  case FM_KEYWORDS:
-    filterReduceByKeywords(state, str);
-    break;
+  bool incremental = false;
+  if (state->prevSearch && state->settings.filterMode == FM_COMPLETE) {
+    if (wcsstr(str, state->prevSearch) == str) {
+      incremental = true;
+    }
   }
+
+  if (!incremental) {
+    state->searchResultCount = state->entryCount;
+    for (size_t i = 0; i < state->entryCount; i++) {
+      state->searchResults[i] = i;
+    }
+  }
+
+  if (wcslen(str) > 0) {
+    switch (state->settings.filterMode) {
+    case FM_COMPLETE:
+      filterReduceByStr(state, str);
+      break;
+    case FM_KEYWORDS:
+      filterReduceByKeywords(state, str);
+      break;
+    }
+  }
+
+  if (state->prevSearch) free(state->prevSearch);
+  state->prevSearch = _wcsdup(str);
 
   state->selectedResultIndex =
       state->searchResultCount > 0 ? 0 : SELECTED_INDEX_NO_RESULT;
@@ -444,6 +474,19 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
   return CallWindowProc(state->editWndProc, wnd, msg, wparam, lparam);
 }
 
+static void drawTextOutlined(HDC hdc, const wchar_t *text, int len, RECT *rect, UINT format, COLORREF textColor, COLORREF outlineColor) {
+  COLORREF oldColor = SetTextColor(hdc, outlineColor);
+  int offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+  for (int i = 0; i < 4; i++) {
+    RECT tr = *rect;
+    OffsetRect(&tr, offsets[i][0], offsets[i][1]);
+    DrawTextW(hdc, text, len, &tr, format);
+  }
+  SetTextColor(hdc, textColor);
+  DrawTextW(hdc, text, len, rect, format);
+  SetTextColor(hdc, oldColor);
+}
+
 void forceForeground(HWND hwnd) {
   // Use trick from https://stackoverflow.com/a/59659421
   const DWORD foregroundThreadId =
@@ -565,8 +608,13 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
       }
 
       SetTextColor(g_bfhdc, state->settings.fgSelect);
-      DrawTextW(g_bfhdc, state->settings.promptText, -1, &promptRect,
-                DRAWTEXT_PARAMS);
+      if (state->settings.hasOutline) {
+        drawTextOutlined(g_bfhdc, state->settings.promptText, -1, &promptRect,
+                         DRAWTEXT_PARAMS, state->settings.fgSelect, state->settings.outlineColor);
+      } else {
+        DrawTextW(g_bfhdc, state->settings.promptText, -1, &promptRect,
+                  DRAWTEXT_PARAMS);
+      }
     }
 
     // Draw input field background/outline
@@ -618,7 +666,12 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         .bottom = wx.bottom - G_MARGIN,
     };
     debug_log("layout: bp=%d entriesTop=%d contentHeight=%d textRect=[%d,%d,%d,%d] scrollbarWidth=%d", bp, entriesTop, contentHeight, textRect.left, textRect.top, textRect.right, textRect.bottom, scrollbarWidth);
+    
+    // Set default background color for text antialiasing
+    COLORREF defaultAaBg = state->settings.hasBgAntialias ? state->settings.bgAntialias : state->settings.bg;
+    SetBkColor(g_bfhdc, defaultAaBg);
     SetTextColor(g_bfhdc, state->settings.fg);
+
     const size_t count =
         min(state->lineCount, state->searchResultCount - pageStartI);
 
@@ -661,20 +714,32 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           Rectangle(g_bfhdc, currentX, wx.top, currentX + 120 - G_MARGIN,
                     wx.bottom - G_MARGIN);
           SetTextColor(g_bfhdc, state->settings.fgSelect);
+          SetBkColor(g_bfhdc, selBg);
         } else {
           SetTextColor(g_bfhdc, state->settings.fg);
+          SetBkColor(g_bfhdc, defaultAaBg);
         }
 
         // Draw this item
-        DrawTextW(g_bfhdc, state->entries[state->searchResults[itemIdx]], -1,
-                  &itemRect,
-                  DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER | DT_VCENTER |
-                      DT_SINGLELINE);
+        if (state->settings.hasOutline) {
+          drawTextOutlined(g_bfhdc, state->entries[state->searchResults[itemIdx]], -1,
+                           &itemRect,
+                           DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER | DT_VCENTER |
+                               DT_SINGLELINE, 
+                           (itemIdx == state->selectedResultIndex) ? state->settings.fgSelect : state->settings.fg,
+                           state->settings.outlineColor);
+        } else {
+          DrawTextW(g_bfhdc, state->entries[state->searchResults[itemIdx]], -1,
+                    &itemRect,
+                    DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER | DT_VCENTER |
+                        DT_SINGLELINE);
+        }
 
         currentX += itemWidth;
       }
 
       // Scrollbar markers (non-interactable)
+      // ... (rest of scrollbar logic unchanged)
       if (state->searchResultCount > (size_t)itemsPerPageSafe) {
         const int listBottom_h = textRect.bottom;
         const int barW = max(10, availableWidth * itemsPerPageSafe / (int)state->searchResultCount);
@@ -717,6 +782,10 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
           Rectangle(g_bfhdc, selLeft, textRect.top, selRight,
                     textRect.top + LINE_HEIGHT(state->settings.fontSize));
           SetTextColor(g_bfhdc, state->settings.fgSelect);
+          SetBkColor(g_bfhdc, selBg);
+        } else {
+          SetTextColor(g_bfhdc, state->settings.fg);
+          SetBkColor(g_bfhdc, defaultAaBg);
         }
 
         // Calculate single line rect for vertical centering
@@ -724,17 +793,18 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         lineRect.bottom = lineRect.top + LINE_HEIGHT(state->settings.fontSize);
 
         // Draw this line
-        DrawTextW(g_bfhdc, state->entries[state->searchResults[idx]], -1,
-                  &lineRect, DRAWTEXT_PARAMS);
-        textRect.top += LINE_HEIGHT(state->settings.fontSize);
-
-        // Reset text colors
-        if (idx == state->selectedResultIndex) {
-          SetTextColor(g_bfhdc, state->settings.fg);
+        if (state->settings.hasOutline) {
+          drawTextOutlined(g_bfhdc, state->entries[state->searchResults[idx]], -1,
+                           &lineRect, DRAWTEXT_PARAMS,
+                           (idx == state->selectedResultIndex) ? state->settings.fgSelect : state->settings.fg,
+                           state->settings.outlineColor);
+        } else {
+          DrawTextW(g_bfhdc, state->entries[state->searchResults[idx]], -1,
+                    &lineRect, DRAWTEXT_PARAMS);
         }
+        textRect.top += LINE_HEIGHT(state->settings.fontSize);
       }
-
-      // Scrollbar markers (non-interactable)
+      // ... (rest of scrollbar logic unchanged)
       if (state->searchResultCount > state->lineCount) {
         // Use the actual height of the items for the scrollbar track
         const int listHeight = (int)state->lineCount * LINE_HEIGHT(state->settings.fontSize);
@@ -909,6 +979,41 @@ void createWindow(state_t *state) {
     y = mi.rcMonitor.top;
   }
 
+  // Handle auto-outline by sampling screen brightness
+  bool needsOutline = false;
+  if (state->settings.autoOutline || state->settings.hasAutoAcrylicColor) {
+    state->settings.hasOutline = false; // Sensor takes control
+    HDC hdcScreen = GetDC(NULL);
+    if (hdcScreen) {
+      // Sample 1: Bottom-left, Sample 2: Top-right
+      COLORREF samples[2] = {
+          GetPixel(hdcScreen, x - 2, y + (int)state->height + 2),
+          GetPixel(hdcScreen, x + (int)state->width + 2, y - 2)};
+      
+      for (int i = 0; i < 2; i++) {
+        if (samples[i] == CLR_INVALID) continue;
+        int r = GetRValue(samples[i]);
+        int g = GetGValue(samples[i]);
+        int b = GetBValue(samples[i]);
+        // Perceived luminance formula
+        double lum = (0.299 * r + 0.587 * g + 0.114 * b);
+        if (lum > 128) {
+          needsOutline = true;
+          break;
+        }
+      }
+
+      if (needsOutline && state->settings.autoOutline) {
+        state->settings.hasOutline = true;
+        // Default to black outline if not manually set
+        if (state->settings.outlineColor == 0 && GetRValue(state->settings.fg) > 128) {
+           state->settings.outlineColor = RGB(0, 0, 0);
+        }
+      }
+      ReleaseDC(NULL, hdcScreen);
+    }
+  }
+
   state->mainWnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, state->settings.wndClass, L"wlines",
       WS_POPUP, x, y, state->width, state->height, 0, 0, 0, 0);
@@ -960,13 +1065,18 @@ void createWindow(state_t *state) {
       if (setWindowCompositionAttribute) {
         // GradientColor is AABBGGRR. state->settings.bg is already 0x00BBGGRR.
         int tintColor = (state->settings.bgAlpha << 24) | (state->settings.bg & 0xFFFFFF);
+        if (needsOutline && state->settings.hasAutoAcrylicColor) {
+          tintColor = (state->settings.autoAcrylicAlpha << 24) | (state->settings.autoAcrylicColor & 0xFFFFFF);
+        } else if (state->settings.hasAcrylicColor) {
+          tintColor = (state->settings.acrylicAlpha << 24) | (state->settings.acrylicColor & 0xFFFFFF);
+        }
         ACCENT_POLICY accent = { ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, tintColor, 0 };
         WINDOWCOMPOSITIONATTRIBDATA data;
         data.Attribute = WCA_ACCENT_POLICY;
         data.Data = &accent;
         data.SizeOfData = sizeof(accent);
         setWindowCompositionAttribute(state->mainWnd, &data);
-        debug_log("SetWindowCompositionAttribute: applied acrylic policy");
+        debug_log("SetWindowCompositionAttribute: applied acrylic policy, tintColor=%08x", tintColor);
       }
     }
   }
@@ -1061,7 +1171,7 @@ void parseStdinEntries(state_t *state) {
   }
 
   // Read utf8 stdin
-  char buf[1024];
+  char buf[65536];
   buf_t stdinUtf8 = {0};
   size_t lineLen;
   while ((lineLen = fread(buf, 1, sizeof(buf), stdin))) {
@@ -1110,7 +1220,7 @@ void loadFont(state_t *state) {
   lf.lfWeight = FW_NORMAL;
   lf.lfCharSet = DEFAULT_CHARSET;
   lf.lfOutPrecision = OUT_TT_ONLY_PRECIS;
-  lf.lfQuality = CLEARTYPE_QUALITY;
+  lf.lfQuality = state->settings.fontQuality;
   lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
   wcsncpy(lf.lfFaceName, state->settings.fontName, LF_FACESIZE - 1);
 
@@ -1186,6 +1296,7 @@ void usage(void) {
           "\t-cs   Case-sensitive filter\n"
           "\t-id   Output index of the selected line, or -1 when no match\n"
           "\t-blur Enable background blur (acrylic effect, Windows 10+)\n"
+          "\t-auto-oc Enable automatic text outline based on background brightness\n"
           "\n"
           "OPTIONS:\n"
           "\t-l    <count>   Amount of lines to show in list\n"
@@ -1203,8 +1314,13 @@ void usage(void) {
           "\t-sfg  <hex>     Selected foreground color\n"
           "\t-tbg  <hex>     Text input background color\n"
           "\t-tfg  <hex>     Text input foreground color\n"
+          "\t-aabg <hex>     Explicit background color for text antialiasing\n"
+          "\t-ac   <hex>     Acrylic tint color (requires -blur)\n"
+          "\t-aac  <hex>     Auto acrylic tint color for bright backgrounds\n"
+          "\t-oc   <hex>     Text outline color\n"
           "\t-f    <font>    Font name\n"
           "\t-fs   <size>    Font size\n"
+          "\t-aa   <quality> Font quality (0: none, 1: antialias, 2: cleartype)\n"
           "\n"
           "FILTER MODES:\n"
           "\tcomplete        Filter on the entire search string (default)\n"
@@ -1236,7 +1352,8 @@ int main(void) {
   _setmode(_fileno(stdout), _O_BINARY);
 
   int argc;
-  wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  g_argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  wchar_t **argv = g_argv;
 
   // Turn off stdout buffering
   setvbuf(stdout, 0, _IONBF, 0);
@@ -1247,34 +1364,37 @@ int main(void) {
   // Init state with default settings
   int bgAlpha, fgAlpha, bgSelectAlpha, fgSelectAlpha, bgEditAlpha, fgEditAlpha;
 
-  state_t state = {
-      .settings =
-          {
-              .wndClass = L"wlines_window",
-              .padding = 4,
-              .filterMode = FM_COMPLETE,
-              .caseSensitiveSearch = false,
-              .bg = parseColor(L"#000000", &bgAlpha),
-              .fg = parseColor(L"#ffffff", &fgAlpha),
-              .bgSelect = parseColor(L"#ffffff", &bgSelectAlpha),
-              .fgSelect = parseColor(L"#000000", &fgSelectAlpha),
-              .bgEdit = parseColor(L"#111111", &bgEditAlpha),
-              .fgEdit = parseColor(L"#ffffff", &fgEditAlpha),
-              .fontName = L"Courier New",
-              .fontSize = 24,
-              .lineCount = 15,
-              .borderColor = 0xFFFFFF,
-              .borderPadding = 4,
-          },
-  };
+  g_state = xrealloc(NULL, sizeof(state_t));
+  memset(g_state, 0, sizeof(state_t));
+  atexit(cleanup);
+
+  state_t *state = g_state;
+  state->settings.wndClass = L"wlines_window";
+  state->settings.padding = 4;
+  state->settings.filterMode = FM_COMPLETE;
+  state->settings.caseSensitiveSearch = false;
+  state->settings.bg = parseColor(L"#000000", &bgAlpha);
+  state->settings.fg = parseColor(L"#ffffff", &fgAlpha);
+  state->settings.bgSelect = parseColor(L"#ffffff", &bgSelectAlpha);
+  state->settings.fgSelect = parseColor(L"#000000", &fgSelectAlpha);
+  state->settings.bgEdit = parseColor(L"#111111", &bgEditAlpha);
+  state->settings.fgEdit = parseColor(L"#ffffff", &fgEditAlpha);
+  state->settings.fontName = L"Courier New";
+  state->settings.fontSize = 24;
+  state->settings.lineCount = 15;
+  state->settings.borderColor = 0xFFFFFF;
+  state->settings.borderPadding = 4;
+  state->settings.fontQuality = CLEARTYPE_QUALITY;
+  state->settings.hasBgAntialias = false;
+  state->settings.hasAcrylicColor = false;
 
   // Copy alpha values to state
-  state.settings.bgAlpha = bgAlpha;
-  state.settings.fgAlpha = fgAlpha;
-  state.settings.bgSelectAlpha = bgSelectAlpha;
-  state.settings.fgSelectAlpha = fgSelectAlpha;
-  state.settings.bgEditAlpha = bgEditAlpha;
-  state.settings.fgEditAlpha = fgEditAlpha;
+  state->settings.bgAlpha = bgAlpha;
+  state->settings.fgAlpha = fgAlpha;
+  state->settings.bgSelectAlpha = bgSelectAlpha;
+  state->settings.fgSelectAlpha = fgSelectAlpha;
+  state->settings.bgEditAlpha = bgEditAlpha;
+  state->settings.fgEditAlpha = fgEditAlpha;
 
   // Parse arguments
   for (int i = 1; i < argc; i++) {
@@ -1282,79 +1402,99 @@ int main(void) {
     if (!wcscmp(argv[i], L"-h")) {
       usage();
     } else if (!wcscmp(argv[i], L"-cs")) {
-      state.settings.caseSensitiveSearch = true;
+      state->settings.caseSensitiveSearch = true;
     } else if (!wcscmp(argv[i], L"-id")) {
-      state.settings.outputIndex = true;
+      state->settings.outputIndex = true;
     } else if (!wcscmp(argv[i], L"-blur")) {
-      state.settings.blur = true;
+      state->settings.blur = true;
+    } else if (!wcscmp(argv[i], L"-auto-oc")) {
+      state->settings.autoOutline = true;
     } else if (!wcscmp(argv[i], L"-border")) {
-      state.settings.border = true;
+      state->settings.border = true;
     } else if (!wcscmp(argv[i], L"-hl")) {
-      state.settings.horizontalLayout = true;
-      state.settings.inputWidth = _wtoi(argv[++i]);
-      if (state.settings.inputWidth < 1) {
+      state->settings.horizontalLayout = true;
+      state->settings.inputWidth = _wtoi(argv[++i]);
+      if (state->settings.inputWidth < 1) {
         usage();
       }
     } else if (i + 1 == argc) {
       usage();
       // Options
     } else if (!wcscmp(argv[i], L"-l")) {
-      state.settings.lineCount = _wtoi(argv[++i]);
-      if (state.settings.lineCount < 1) {
+      state->settings.lineCount = _wtoi(argv[++i]);
+      if (state->settings.lineCount < 1) {
         usage();
       }
     } else if (!wcscmp(argv[i], L"-p")) {
-      state.settings.promptText = argv[++i];
+      state->settings.promptText = argv[++i];
     } else if (!wcscmp(argv[i], L"-fm")) {
       const wchar_t *modeStr = argv[++i];
       if (!wcscmp(modeStr, L"complete")) {
-        state.settings.filterMode = FM_COMPLETE;
+        state->settings.filterMode = FM_COMPLETE;
       } else if (!wcscmp(modeStr, L"keywords")) {
-        state.settings.filterMode = FM_KEYWORDS;
+        state->settings.filterMode = FM_KEYWORDS;
       } else {
         usage();
       }
     } else if (!wcscmp(argv[i], L"-si")) {
-      state.settings.selectedIndex = _wtoi(argv[++i]);
-      if (state.settings.selectedIndex < 0) {
+      state->settings.selectedIndex = _wtoi(argv[++i]);
+      if (state->settings.selectedIndex < 0) {
         usage();
       }
     } else if (!wcscmp(argv[i], L"-px")) {
-      state.settings.padding = _wtoi(argv[++i]);
-      if (state.settings.padding < 0) {
+      state->settings.padding = _wtoi(argv[++i]);
+      if (state->settings.padding < 0) {
         usage();
       }
     } else if (!wcscmp(argv[i], L"-wx")) {
-      state.settings.width = _wtoi(argv[++i]);
-      state.settings.centerWindow = true;
-      if (state.settings.width < 1) {
+      state->settings.width = _wtoi(argv[++i]);
+      state->settings.centerWindow = true;
+      if (state->settings.width < 1) {
         usage();
       }
     } else if (!wcscmp(argv[i], L"-bg")) {
-      state.settings.bg = parseColor(argv[++i], &state.settings.bgAlpha);
+      state->settings.bg = parseColor(argv[++i], &state->settings.bgAlpha);
     } else if (!wcscmp(argv[i], L"-fg")) {
-      state.settings.fg = parseColor(argv[++i], &state.settings.fgAlpha);
+      state->settings.fg = parseColor(argv[++i], &state->settings.fgAlpha);
     } else if (!wcscmp(argv[i], L"-sbg")) {
-      state.settings.bgSelect =
-          parseColor(argv[++i], &state.settings.bgSelectAlpha);
+      state->settings.bgSelect =
+          parseColor(argv[++i], &state->settings.bgSelectAlpha);
     } else if (!wcscmp(argv[i], L"-sfg")) {
-      state.settings.fgSelect =
-          parseColor(argv[++i], &state.settings.fgSelectAlpha);
+      state->settings.fgSelect =
+          parseColor(argv[++i], &state->settings.fgSelectAlpha);
     } else if (!wcscmp(argv[i], L"-tbg")) {
-      state.settings.bgEdit =
-          parseColor(argv[++i], &state.settings.bgEditAlpha);
+      state->settings.bgEdit =
+          parseColor(argv[++i], &state->settings.bgEditAlpha);
     } else if (!wcscmp(argv[i], L"-tfg")) {
-      state.settings.fgEdit =
-          parseColor(argv[++i], &state.settings.fgEditAlpha);
+      state->settings.fgEdit =
+          parseColor(argv[++i], &state->settings.fgEditAlpha);
+    } else if (!wcscmp(argv[i], L"-aabg")) {
+      state->settings.bgAntialias = parseColor(argv[++i], (int[]){0});
+      state->settings.hasBgAntialias = true;
+    } else if (!wcscmp(argv[i], L"-ac")) {
+      state->settings.acrylicColor = parseColor(argv[++i], &state->settings.acrylicAlpha);
+      state->settings.hasAcrylicColor = true;
+    } else if (!wcscmp(argv[i], L"-aac")) {
+      state->settings.autoAcrylicColor = parseColor(argv[++i], &state->settings.autoAcrylicAlpha);
+      state->settings.hasAutoAcrylicColor = true;
+    } else if (!wcscmp(argv[i], L"-oc")) {
+      state->settings.outlineColor = parseColor(argv[++i], (int[]){0});
+      state->settings.hasOutline = true;
+    } else if (!wcscmp(argv[i], L"-aa")) {
+      int q = _wtoi(argv[++i]);
+      if (q == 0) state->settings.fontQuality = NONANTIALIASED_QUALITY;
+      else if (q == 1) state->settings.fontQuality = ANTIALIASED_QUALITY;
+      else if (q == 2) state->settings.fontQuality = CLEARTYPE_QUALITY;
+      else usage();
     } else if (!wcscmp(argv[i], L"-bc")) {
-      state.settings.borderColor = parseColor(argv[++i], (int[]){0});
+      state->settings.borderColor = parseColor(argv[++i], (int[]){0});
     } else if (!wcscmp(argv[i], L"-bp")) {
-      state.settings.borderPadding = _wtoi(argv[++i]);
+      state->settings.borderPadding = _wtoi(argv[++i]);
     } else if (!wcscmp(argv[i], L"-f")) {
-      state.settings.fontName = argv[++i];
+      state->settings.fontName = argv[++i];
     } else if (!wcscmp(argv[i], L"-fs")) {
-      state.settings.fontSize = _wtoi(argv[++i]);
-      if (state.settings.fontSize < 1) {
+      state->settings.fontSize = _wtoi(argv[++i]);
+      if (state->settings.fontSize < 1) {
         usage();
       }
     } else {
@@ -1362,19 +1502,19 @@ int main(void) {
     }
   }
 
-  loadFont(&state);
-  parseStdinEntries(&state);
-  state.lineCount = min((size_t)state.settings.lineCount, state.entryCount);
-  createWindow(&state);
-  debug_log("createWindow returned mainWnd=%p contentWidth=%zu contentHeight=%zu", state.mainWnd, state.contentWidth, state.contentHeight);
-  updateSearchResults(&state);
-  if (state.entryCount > 0) {
-    state.selectedResultIndex =
-        min((size_t)state.settings.selectedIndex, state.entryCount - 1);
+  loadFont(state);
+  parseStdinEntries(state);
+  state->lineCount = min((size_t)state->settings.lineCount, state->entryCount);
+  createWindow(state);
+  debug_log("createWindow returned mainWnd=%p contentWidth=%zu contentHeight=%zu", state->mainWnd, state->contentWidth, state->contentHeight);
+  updateSearchResults(state);
+  if (state->entryCount > 0) {
+    state->selectedResultIndex =
+        min((size_t)state->settings.selectedIndex, state->entryCount - 1);
   } else {
-    state.selectedResultIndex = SELECTED_INDEX_NO_RESULT;
+    state->selectedResultIndex = SELECTED_INDEX_NO_RESULT;
   }
   windowEventLoop();
 
-  return 1;
+  return 0;
 }
