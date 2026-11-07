@@ -492,11 +492,27 @@ void forceForeground(HWND hwnd) {
   const DWORD foregroundThreadId =
       GetWindowThreadProcessId(GetForegroundWindow(), 0);
   const DWORD currentThreadId = GetCurrentThreadId();
-  AttachThreadInput(foregroundThreadId, currentThreadId, true);
+  
+  if (foregroundThreadId != currentThreadId) {
+    AttachThreadInput(foregroundThreadId, currentThreadId, true);
+  }
+  
+  // Use HWND_TOPMOST to ensure window is brought to front
+  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  
   BringWindowToTop(hwnd);
   ShowWindow(hwnd, SW_SHOW);
   SetForegroundWindow(hwnd);
-  AttachThreadInput(foregroundThreadId, currentThreadId, false);
+  SetFocus(hwnd);
+  
+  // Restore normal window positioning (no longer topmost)
+  SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  
+  if (foregroundThreadId != currentThreadId) {
+    AttachThreadInput(foregroundThreadId, currentThreadId, false);
+  }
 }
 
 LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam) {
